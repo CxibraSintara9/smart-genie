@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- <link rel="icon" type="image/svg+xml" href="/vite.svg" /> -->
+     <link rel="icon" type="image/svg+xml" href="/public/CompressJPEG.Online_img(512x512) (3).jpg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Genie</title>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Your React entry point -->
+    <script type="module" src="/src/main.jsx"></script>
+   
+
+    <!-- Load OpenCV separately -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+    <script>
+      window.cv = window.cv || {};
+      window.cv.onRuntimeInitialized = () => {
+        console.log("OpenCV ready!");
+      };
+    </script>
+  </body>
+</html>
