@@ -442,57 +442,50 @@ export default function AccountManagement() {
   };
 
   const handleDeleteAccount = async () => {
-    if (!userId) {
-      setErrorText("User ID not found. Please try logging out and back in.");
-      setShowErrorModal(true);
-      return;
-    }
-
+    if (!userId) return;
     setLoading(true);
     setErrorText("");
 
     try {
-      // Get the current session to include auth token
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      
-      if (sessionError || !session) {
-        throw new Error("Authentication session not found. Please log in again.");
-      }
+      // Get current session for access token
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError) throw sessionError;
+      if (!session) throw new Error("You must be logged in to delete your account.");
 
       console.log("Attempting to delete user with ID:", userId);
       
       const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/delete-user`,
+        "https://exscmqdazkrtrfhstytk.supabase.co/functions/v1/delete-user",
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${session.access_token}`,
+            Authorization: `Bearer ${session.access_token}`,
           },
           body: JSON.stringify({ userId }),
         }
       );
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || `HTTP ${response.status}: Failed to delete account`);
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Server error: ${response.status}`);
       }
 
+      const data = await response.json();
       if (data.success) {
-        // Show success message
-        setShowSuccessToast(true);
-        setTimeout(() => setShowSuccessToast(false), 2000);
+        // Successfully deleted account
+        setShowDeleteModal(false);
+        alert("✅ Your account has been successfully deleted.");
         
-        // Sign out the user
+        // Sign out and navigate to login
         await supabase.auth.signOut();
-        
-        // Navigate to login page after a short delay
-        setTimeout(() => {
-          navigate("/login");
-        }, 2000);
+        navigate("/login");
       } else {
-        throw new Error(data.error || "Failed to delete account");
+        throw new Error(data.error || "Failed to delete account.");
       }
     } catch (error) {
       console.error("Error deleting account:", error);
@@ -577,12 +570,6 @@ export default function AccountManagement() {
             </div>
 
             <div className="bg-red-50 p-4 rounded-xl shadow-sm">
-              {hasHealthData && (
-                <div className="text-sm text-red-600 mb-2 font-medium flex items-center gap-1">
-                  ⚠️ Please clear your health profile before deleting your
-                  account.
-                </div>
-              )}
               <button
                 onClick={() => !hasHealthData && setShowDeleteModal(true)}
                 disabled={hasHealthData || loading}
@@ -773,12 +760,14 @@ export default function AccountManagement() {
         {showSuccessToast && (
           <motion.div
             key="success-toast"
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 20 }}
-            className="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-green-600 text-white px-6 py-3 rounded-xl shadow-lg z-50"
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            className="fixed inset-0 flex items-center justify-center z-50"
           >
-            ✅ Account deleted successfully! Redirecting to login...
+            <div className="bg-green-600 text-white px-6 py-3 rounded-xl shadow-lg text-center">
+              ✅ Health data cleared successfully!
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

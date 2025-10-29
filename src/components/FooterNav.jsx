@@ -27,94 +27,90 @@ export default function FooterNav() {
   const buttonSize = "w-12 h-12"; // Uniform button size
 
   return (
-    <div className="relative w-full h-[70px] bg-white border-t flex items-center justify-around px-8 rounded-t-2xl shadow-lg">
-      {/* Home */}
-      <button
-        onClick={() => navigate("/personaldashboard")}
-        className={`flex items-center justify-center ${buttonSize} rounded-full transition-colors ${
-          isHome
-            ? "bg-green-500 text-white shadow-md"
-            : "text-gray-500 hover:text-green-500"
-        }`}
-        aria-label="Home"
-      >
-        <FiHome size={iconSize} />
-      </button>
+    <div className="absolute bottom-0 left-0 w-full bg-white border-t border-gray-200 rounded-t-2xl shadow-md h-[70px]">
+      <div className="flex items-center justify-around h-full px-6">
+        {/* Home */}
+        <button
+          onClick={() => navigate("/personaldashboard")}
+          className={`flex flex-col items-center justify-center transition-colors ${
+            isHome ? "text-green-500" : "text-gray-500 hover:text-green-500"
+          }`}
+          aria-label="Home"
+        >
+          <FiHome size={25} />
+        </button>
 
-      {/* Journal */}
-      <button
-        onClick={() => navigate("/journal")}
-        className={`flex items-center justify-center ${buttonSize} rounded-full transition-colors ${
-          isJournal
-            ? "bg-green-500 text-white shadow-md"
-            : "text-gray-500 hover:text-green-500"
-        }`}
-        aria-label="Journal"
-      >
-        <FiBookOpen size={iconSize} />
-      </button>
-      <button
-        onClick={() => navigate("/workout")}
-        className={`flex items-center justify-center ${buttonSize} rounded-full transition-colors ${
-          isWorkout
-            ? "bg-green-500 text-white shadow-md"
-            : "text-gray-500 hover:text-green-500"
-        }`}
-        aria-label="workout"
-      >
-        <FaDumbbell size={iconSize} />
-      </button>
+        {/* Journal */}
+        <button
+          onClick={() => navigate("/journal")}
+          className={`flex flex-col items-center justify-center transition-colors ${
+            isJournal ? "text-green-500" : "text-gray-500 hover:text-green-500"
+          }`}
+          aria-label="Journal"
+        >
+          <FiBookOpen size={25} />
+        </button>
 
-      <button
-        onClick={() => navigate("/mealplan")}
-        className={`flex items-center justify-center ${buttonSize} rounded-full transition-colors ${
-          isPlan
-            ? "bg-green-500 text-white shadow-md"
-            : "text-gray-500 hover:text-green-500"
-        }`}
-        aria-label="planner"
-      >
-        <FiCalendar size={iconSize} />
-      </button>
+        {/* Workout */}
+        <button
+          onClick={() => navigate("/workout")}
+          className={`flex flex-col items-center justify-center transition-colors ${
+            isWorkout ? "text-green-500" : "text-gray-500 hover:text-green-500"
+          }`}
+          aria-label="Workout"
+        >
+          <FaDumbbell size={25} />
+        </button>
 
-      {/* Plus */}
-      <label
-        htmlFor="cameraUpload"
-        className={`flex items-center justify-center ${buttonSize} rounded-full transition-colors text-gray-500 hover:text-green-500 cursor-pointer`}
-        aria-label="Scan Dish"
-      >
-        <FiPlus size={iconSize} />
-        <input
-          id="cameraUpload"
-          type="file"
-          accept="image/*"
-          capture="environment"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              const base64Image = reader.result;
-              navigate("/analyze", { state: { image: base64Image } });
-            };
-            reader.readAsDataURL(file);
-          }}
-        />
-      </label>
+        {/* Scan / Plus */}
+        <label
+          htmlFor="cameraUpload"
+          className={`flex flex-col items-center justify-center text-gray-500 hover:text-green-500 cursor-pointer transition-colors`}
+          aria-label="Scan Dish"
+        >
+          <FiPlus size={32} />
+          <input
+            id="cameraUpload"
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                const base64Image = reader.result;
+                navigate("/analyze", { state: { image: base64Image } });
+              };
+              reader.readAsDataURL(file);
+            }}
+          />
+        </label>
 
-      {/* Profile */}
-      <button
-        onClick={() => navigate("/settings")}
-        className={`flex items-center justify-center ${buttonSize} rounded-full transition-colors ${
-          isProfile
-            ? "bg-green-500 text-white shadow-md"
-            : "text-gray-500 hover:text-green-500"
-        }`}
-        aria-label="Profile"
-      >
-        <FiSettings size={iconSize} />
-      </button>
+        {/* Meal Plan */}
+        <button
+          onClick={() => navigate("/mealplan")}
+          className={`flex flex-col items-center justify-center transition-colors ${
+            isPlan ? "text-green-500" : "text-gray-500 hover:text-green-500"
+          }`}
+          aria-label="Meal Plan"
+        >
+          <FiCalendar size={25} />
+        </button>
+
+        {/* Profile */}
+        <button
+          onClick={() => navigate("/settings")}
+          className={`flex flex-col items-center justify-center transition-colors ${
+            isProfile ? "text-green-500" : "text-gray-500 hover:text-green-500"
+          }`}
+          aria-label="Settings"
+        >
+          <FiSettings size={25} />
+        </button>
+      </div>
     </div>
+
   );
 }

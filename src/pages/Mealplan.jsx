@@ -4,6 +4,7 @@ import { supabase } from "../supabaseClient";
 import { useNavigate } from "react-router-dom";
 import { FaUtensils } from "react-icons/fa";
 import FooterNav from "../components/FooterNav";
+import { getBoholCities, recommendStoresForIngredients } from "../services/storeService";
 
 export default function Mealplan({ userId }) {
   const [profile, setProfile] = useState(null);
@@ -14,7 +15,8 @@ export default function Mealplan({ userId }) {
   const [showAlertModal, setShowAlertModal] = useState(false);
   const [alertMessage, setAlertMessage] = useState("");
   const [selectedDish, setSelectedDish] = useState(null);
-
+  const [selectedCityId, setSelectedCityId] = useState("tagbilaran");
+  const [storeTypeFilters, setStoreTypeFilters] = useState([]); // ["supermarket","public_market"]
   const navigate = useNavigate();
 
   // -------------------- Fetch Data (Optimized) --------------------
@@ -35,13 +37,10 @@ export default function Mealplan({ userId }) {
           .single(),
         supabase.from("dishes").select(`
           id, name, description, default_serving, meal_type, goal,
-          eating_style, health_condition, steps,
+          eating_style, health_condition, steps,image_url,
           ingredients_dish_id_fkey(id, name, amount, unit, calories, protein, fats, carbs, is_rice)
         `),
-        supabase
-          .from("meal_logs")
-          .select("*")
-          .eq("user_id", user.id)
+        supabase.from("meal_logs").select("*").eq("user_id", user.id),
       ]);
 
       const profileData = profileResult.data;
@@ -59,15 +58,20 @@ export default function Mealplan({ userId }) {
       setMealLog(mealData);
 
       // --- 🧠 Check if we need to regenerate the plan based on timeframe ---
-      const savedPlan = localStorage.getItem(`weeklyPlan_${user.id}`);
+      // --- 🧠 Check if we need to regenerate the plan based on timeframe ---
+      const savedPlanRaw = localStorage.getItem(`weeklyPlan_${user.id}`);
       let plan = null;
       let needsNewPlan = true;
 
-      if (savedPlan) {
+      if (savedPlanRaw) {
         try {
-          plan = JSON.parse(savedPlan);
-          // Check if the saved plan matches the user's timeframe
-          if (plan && plan.length === profileData.timeframe) {
+          plan = JSON.parse(savedPlanRaw);
+          // handle both old array shape and new object shape { plan: [...] }
+          const planLength = Array.isArray(plan)
+            ? plan.length
+            : plan?.plan?.length ?? 0;
+
+          if (plan && planLength === (profileData.timeframe || 7)) {
             needsNewPlan = false;
           }
         } catch {
@@ -83,13 +87,10 @@ export default function Mealplan({ userId }) {
       // Update weeklyPlan to mark any dishes that are already in meal logs
       const updated = markAddedMeals(plan || [], mealData);
       setWeeklyPlan(updated);
-      
+
       // persist the marked plan
       try {
-        localStorage.setItem(
-          `weeklyPlan_${user.id}`,
-          JSON.stringify(updated)
-        );
+        localStorage.setItem(`weeklyPlan_${user.id}`, JSON.stringify(updated));
       } catch {}
     } catch (error) {
       console.error("Error fetching data:", error);
@@ -523,6 +524,30 @@ export default function Mealplan({ userId }) {
     });
   };
 
+  const [boholCities, setBoholCities] = useState([]);
+  const [storeRecommendations, setStoreRecommendations] = useState([]);
+
+  useEffect(() => {
+    (async () => {
+      const cities = await getBoholCities();
+      setBoholCities(cities || []);
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      if (!selectedDish) {
+        setStoreRecommendations([]);
+        return;
+      }
+      const ings = selectedDish.ingredients_dish_id_fkey || [];
+      const recs = await recommendStoresForIngredients(ings, selectedCityId, {
+        onlyTypes: storeTypeFilters,
+      });
+      setStoreRecommendations(recs || []);
+    })();
+  }, [selectedDish, selectedCityId, storeTypeFilters]);
+
   // -------------------- Filter dishes based on profile --------------------
   const getSuggestedDishes = (profile, dishes, searchQuery = "") => {
     if (!profile || !dishes?.length) return [];
@@ -661,14 +686,12 @@ export default function Mealplan({ userId }) {
         return;
       }
 
-      // Validate required data
       if (!meal.id) {
         setAlertMessage("Invalid meal data. Please try again.");
         setShowAlertModal(true);
         return;
       }
 
-      // Prepare meal log data using dish-level totals (from DB). Ingredients are not used for meal totals per user's request.
       // Get current date in local timezone
       const today = new Date();
       const localDate =
@@ -684,7 +707,6 @@ export default function Mealplan({ userId }) {
       );
       const hasRice = riceIngredient && riceIngredient.amount > 0;
 
-      // Modify dish name if it has rice
       const dishName = hasRice
         ? `${meal.name || "Unknown Dish"} with rice`
         : meal.name || "Unknown Dish";
@@ -711,39 +733,59 @@ export default function Mealplan({ userId }) {
         created_at: new Date().toISOString(),
       };
 
+      // Save to Supabase
       const { error } = await supabase.from("meal_logs").insert([mealLogData]);
 
       if (error) {
         console.error("Error saving meal:", error);
         setAlertMessage(`Failed to save meal: ${error.message}`);
         setShowAlertModal(true);
-      } else {
-        // Update local mealLog state so the UI can reflect the change immediately
-        setMealLog((prev) => [...(prev || []), mealLogData]);
+        return;
+      }
 
-        // Mark the corresponding meal(s) in the weekly plan as added so they become disabled
-        setWeeklyPlan((prev) => {
-          const updated = (prev || []).map((day) => ({
-            ...day,
-            meals: (day.meals || []).map((m) =>
-              Number(m.id) === Number(meal.id) ? { ...m, added: true } : m
-            ),
-          }));
-          try {
-            if (user && user.id)
-              localStorage.setItem(
-                `weeklyPlan_${user.id}`,
-                JSON.stringify(updated)
-              );
-          } catch {}
-          return updated;
+      // Update local state immediately
+      setMealLog((prev) => [...(prev || []), mealLogData]);
+
+      // ✅ Only disable the specific meal type for the specific day
+      setWeeklyPlan((prev) => {
+        if (!prev?.plan) return prev; // safety check
+
+        const updatedPlan = prev.plan.map((day) => {
+          if (day.date === localDate) {
+            return {
+              ...day,
+              meals: (day.meals || []).map((m) =>
+                m.type === (meal.planMealType || meal.type) &&
+                Number(m.id) === Number(meal.id)
+                  ? { ...m, added: true }
+                  : m
+              ),
+            };
+          }
+          return day;
         });
 
-        // Close the modal and show success message
-        setSelectedDish(null);
-        setAlertMessage("Meal added successfully!");
-        setShowAlertModal(true);
-      }
+        const updated = { ...prev, plan: updatedPlan };
+
+        // ✅ Save to localStorage for persistence
+        try {
+          if (user?.id) {
+            localStorage.setItem(
+              `weeklyPlan_${user.id}`,
+              JSON.stringify(updated)
+            );
+          }
+        } catch (err) {
+          console.error("Failed to save plan:", err);
+        }
+
+        return updated;
+      });
+
+      // Close modal and show success
+      setSelectedDish(null);
+      setAlertMessage("Meal added successfully!");
+      setShowAlertModal(true);
     } catch (error) {
       console.error("Error adding meal:", error);
       setAlertMessage("An error occurred. Please try again.");
@@ -752,40 +794,48 @@ export default function Mealplan({ userId }) {
   };
 
   // -------------------- Smart Weekly Meal Plan --------------------
+  // 🧠 Smart Weekly Meal Plan Generator — with Fixed Dates
   const createSmartWeeklyMealPlan = (profile, dishes) => {
     if (!dishes?.length || !profile) return [];
 
-    // Get the timeframe from profile, default to 7 days if not specified
-    const timeframe = profile.timeframe || 7;
-    const mealsPerDay = profile.meals_per_day || 3;
+    // --- 1️⃣ Basic user setup ---
+    const timeframe = Number(profile.timeframe) || 7;
+    const mealsPerDay = Number(profile.meals_per_day) || 3;
     const targetCalories = (profile.calorie_needs || 0) / mealsPerDay;
     const targetProtein = (profile.protein_needed || 0) / mealsPerDay;
     const targetCarbs = (profile.carbs_needed || 0) / mealsPerDay;
     const targetFats = (profile.fats_needed || 0) / mealsPerDay;
-
-    const userAllergens = (profile.allergens || []).map((a) =>
-      a.toLowerCase().trim()
-    );
-    const userHealthConditions = (profile.health_conditions || []).map((hc) =>
-      hc.toLowerCase().trim()
-    );
     const userGoal = profile.goal?.toLowerCase().trim();
-    const userEatingStyle = profile.eating_style?.toLowerCase().trim();
 
-    // Use the same filtering logic as getSuggestedDishes to build eligible dishes
+    // --- 2️⃣ FIXED start and end date (Day-based, not Month-based) ---
+    // Use existing start date if present; otherwise, set once and reuse
+    const startDate = profile.plan_start_date
+      ? new Date(profile.plan_start_date)
+      : new Date();
+
+    // normalize startDate to midnight (avoid timezone drift)
+    startDate.setHours(0, 0, 0, 0);
+
+    const endDate = new Date(startDate);
+    endDate.setDate(startDate.getDate() + timeframe - 1);
+    endDate.setHours(0, 0, 0, 0);
+
+    // store back (if needed)
+    profile.plan_start_date = startDate.toISOString();
+    profile.plan_end_date = endDate.toISOString();
+
+    // --- 3️⃣ Filter eligible dishes ---
     const eligibleDishes = getSuggestedDishes(profile, dishes);
-
-    const shuffle = (array) => [...array].sort(() => Math.random() - 0.5);
 
     const hasMealType = (dish, type) => {
       if (!dish.meal_type) return false;
       const types = dish.meal_type
         .split(/[,|/]/)
         .map((t) => t.toLowerCase().trim());
-      return types.includes(type);
+      return types.includes(type.toLowerCase());
     };
 
-    // Score a dish based on how well it matches the target macros
+    // --- 4️⃣ Score dishes based on nutrition goals ---
     const scoreDish = (dish) => {
       const nutrition = calculateDishNutrition(dish);
       const calorieScore =
@@ -796,7 +846,6 @@ export default function Mealplan({ userId }) {
         1 - Math.abs(nutrition.carbs - targetCarbs) / targetCarbs;
       const fatsScore = 1 - Math.abs(nutrition.fat - targetFats) / targetFats;
 
-      // Weight the scores based on user's goals
       let weights = { calories: 1, protein: 1, carbs: 1, fats: 1 };
 
       if (userGoal?.includes("weight loss")) {
@@ -814,70 +863,65 @@ export default function Mealplan({ userId }) {
       );
     };
 
-    // Create meal pools based on type and score
-    const createMealPool = (type) => {
-      return shuffle(
-        eligibleDishes
-          .filter((d) => hasMealType(d, type))
-          .map((dish) => ({
-            ...dish,
-            score: scoreDish(dish),
-          }))
-          .sort((a, b) => b.score - a.score)
-      );
-    };
+    // --- 5️⃣ Create sorted meal pools ---
+    const createMealPool = (type) =>
+      eligibleDishes
+        .filter((d) => hasMealType(d, type))
+        .map((dish) => ({
+          ...dish,
+          score: scoreDish(dish),
+        }))
+        .sort((a, b) => b.score - a.score);
 
-    let breakfastPool = createMealPool("breakfast");
-    let lunchPool = createMealPool("lunch");
-    let dinnerPool = createMealPool("dinner");
-    let snackPool = createMealPool("snack");
+    const breakfastPool = createMealPool("breakfast");
+    const lunchPool = createMealPool("lunch");
+    const dinnerPool = createMealPool("dinner");
+    const snackPool = createMealPool("snack");
 
-    // Track used dish ids so we don't repeat the same dish across meal types/days
-    const usedDishIds = new Set();
-
+    // --- 6️⃣ Build the plan ---
     const weeklyPlan = [];
 
     for (let i = 0; i < timeframe; i++) {
-      const selectMeal = (pool) => {
-        if (!pool || !pool.length)
-          return { name: "Meal not found", ingredients: [] };
-        // find the first dish in the pool that hasn't been used yet
-        let idx = pool.findIndex((d) => !usedDishIds.has(d.id));
-        if (idx === -1) {
-          // all dishes in this pool were used; as a fallback, allow repeats by taking first
-          idx = 0;
-        }
-        const meal = pool.splice(idx, 1)[0]; // remove from pool
-        if (meal && meal.id) usedDishIds.add(meal.id);
-        return meal || { name: "Meal not found", ingredients: [] };
-      };
+      const currentDate = new Date(startDate);
+      currentDate.setDate(startDate.getDate() + i);
+      currentDate.setHours(0, 0, 0, 0);
 
       const dayPlan = {
         day: `Day ${i + 1}`,
+        date: currentDate.toISOString().split("T")[0],
         meals: [],
       };
 
-      // Add main meals
-      const breakfast = selectMeal(breakfastPool);
-      const lunch = selectMeal(lunchPool);
-      const dinner = selectMeal(dinnerPool);
+      const usedToday = new Set();
+
+      const selectMeal = (pool, index) => {
+        if (!pool?.length) return { name: "Meal not found", ingredients: [] };
+        const available = pool.filter((d) => !usedToday.has(d.id));
+        const meal =
+          available[index % available.length] || pool[index % pool.length];
+        if (meal?.id) usedToday.add(meal.id);
+        return meal;
+      };
+
+      const breakfast = selectMeal(breakfastPool, i);
+      const lunch = selectMeal(lunchPool, i);
+      const dinner = selectMeal(dinnerPool, i);
 
       dayPlan.meals.push({ type: "Breakfast", ...breakfast });
       dayPlan.meals.push({ type: "Lunch", ...lunch });
       dayPlan.meals.push({ type: "Dinner", ...dinner });
 
-      // Add snacks if needed
       if (mealsPerDay > 3) {
         const snacks = Array(mealsPerDay - 3)
           .fill()
-          .map(() => {
-            const snack = selectMeal(snackPool);
-            return { type: "Snack", ...snack };
-          });
+          .map((_, j) => ({
+            type: "Snack",
+            ...selectMeal(snackPool, i + j),
+          }));
         dayPlan.meals.push(...snacks);
       }
 
-      // Calculate daily totals
+      // --- 7️⃣ Calculate totals per day ---
       const dailyTotals = dayPlan.meals.reduce(
         (totals, meal) => {
           const nutrition = calculateDishNutrition(meal);
@@ -895,7 +939,12 @@ export default function Mealplan({ userId }) {
       weeklyPlan.push(dayPlan);
     }
 
-    return weeklyPlan;
+    // --- 8️⃣ Return final plan with proper formatted range ---
+    return {
+      start_date: startDate.toISOString().split("T")[0],
+      end_date: endDate.toISOString().split("T")[0],
+      plan: weeklyPlan,
+    };
   };
 
   // Return true if a dish has been added for the specific meal type on this day
@@ -962,303 +1011,544 @@ export default function Mealplan({ userId }) {
   }
 
   return (
-    <div className="p-4 max-w-4xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold mb-2 flex items-center gap-2">
-          <FaUtensils /> Your Personalized Meal Plan ({profile.timeframe || 7}{" "}
-          Days)
-        </h1>
-        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 mb-6">
-          <h2 className="text-lg font-semibold text-emerald-800 mb-2">
-            Your Health Profile Summary
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <p className="text-sm text-gray-600">
-                Daily Calories:{" "}
-                <span className="font-medium">
-                  {Math.round(profile.calorie_needs)} kcal
-                </span>
+    // <div className="p-4 max-w-6xl mx-auto">
+    //   {/* Header */}
+    //   <div className="mb-6 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
+    //     <h1 className="text-2xl font-bold flex items-center gap-2 text-emerald-700">
+    //       <FaUtensils />
+    //       Your Personalized Meal Plan ({profile.timeframe || 7} Days)
+    //     </h1>
+    //     {weeklyPlan?.start_date && weeklyPlan?.end_date && (
+    //       <p className="text-sm text-gray-500">
+    //         {new Date(weeklyPlan.start_date).toLocaleDateString("en-US", {
+    //           month: "short",
+    //           day: "numeric",
+    //         })}{" "}
+    //         –{" "}
+    //         {new Date(weeklyPlan.end_date).toLocaleDateString("en-US", {
+    //           month: "short",
+    //           day: "numeric",
+    //         })}
+    //       </p>
+    //     )}
+    //   </div>
+
+    //   {/* Plan Grid */}
+    //   <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-x-auto">
+    //     <div
+    //       className="grid min-w-max"
+    //       style={{
+    //         gridTemplateColumns: `160px repeat(${
+    //           weeklyPlan?.plan?.length || 0
+    //         }, 1fr)`,
+    //       }}
+    //     >
+    //       {/* Empty corner cell */}
+    //       <div className="bg-emerald-600 rounded-tl-2xl"></div>
+
+    //       {/* 🗓️ Day Headers */}
+    //       {weeklyPlan?.plan?.map((dayPlan, i) => {
+    //         const date = new Date(dayPlan.date);
+    //         const dayName = date.toLocaleDateString("en-US", {
+    //           weekday: "short",
+    //         });
+    //         return (
+    //           <div
+    //             key={i}
+    //             className="bg-emerald-600 text-white text-center py-3 font-semibold border-l border-emerald-500"
+    //           >
+    //             <div>{dayName}</div>
+    //             <div className="text-xs text-emerald-100">
+    //               {date.toLocaleDateString("en-US", {
+    //                 month: "short",
+    //                 day: "numeric",
+    //               })}
+    //             </div>
+    //           </div>
+    //         );
+    //       })}
+
+    //       {/* 🍽️ Meal Rows */}
+    //       {["Breakfast", "Lunch", "Dinner", "Snack"].map((mealType) => (
+    //         <React.Fragment key={mealType}>
+    //           {/* Left-side meal type label */}
+    //           <div className="bg-gray-50 border-t border-gray-200 px-4 py-3 font-semibold text-gray-700 text-sm sticky left-0 z-10">
+    //             {mealType}
+    //           </div>
+
+    //           {/* Meal cells per day */}
+    //           {weeklyPlan?.plan?.map((dayPlan, j) => {
+    //             const meal = dayPlan.meals.find((m) => m.type === mealType);
+    //             return (
+    //               <div
+    //                 key={j}
+    //                 className="border-t border-l border-gray-100 p-3 flex flex-col items-center justify-center min-h-[170px] transition-all duration-300 hover:bg-emerald-50"
+    //               >
+    //                 {meal ? (
+    //                   <div
+    //                     onClick={() => !meal.added && handleOpenDish(meal)}
+    //                     className={`relative w-full max-w-[130px] p-2 text-center rounded-xl shadow-sm border transition-all duration-200 ${
+    //                       meal.added
+    //                         ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+    //                         : "bg-white hover:shadow-md hover:border-emerald-300 text-gray-700 cursor-pointer"
+    //                     }`}
+    //                   >
+    //                     <div className="w-24 h-24 mx-auto mb-2 rounded-lg overflow-hidden flex items-center justify-center bg-gray-100 text-gray-400 text-xs">
+    //                       {meal.image_url ? (
+    //                         <img
+    //                           src={meal.image_url}
+    //                           alt={meal.name || "Dish"}
+    //                           className="w-full h-full object-cover"
+    //                         />
+    //                       ) : (
+    //                         <span>No Image</span>
+    //                       )}
+    //                     </div>
+
+    //                     <p className="text-sm font-medium truncate">
+    //                       {meal.name}
+    //                     </p>
+    //                     <p className="text-xs text-gray-500 mt-1">
+    //                       {Math.round(meal.total_calories || 0)} kcal •{" "}
+    //                       {Math.round(meal.total_protein || 0)}g
+    //                     </p>
+
+    //                     {/* Smooth badge animation for added state */}
+    //                     {meal.added && (
+    //                       <span className="absolute top-2 right-2 text-[10px] bg-green-100 text-green-700 px-2 py-[2px] rounded-full animate-fadeIn">
+    //                         ✓ Added
+    //                       </span>
+    //                     )}
+    //                   </div>
+    //                 ) : (
+    //                   <div className="text-gray-400 text-xs flex items-center justify-center h-full w-full bg-white rounded-xl border border-dashed border-gray-200">
+    //                     No meal
+    //                   </div>
+    //                 )}
+    //               </div>
+    //             );
+    //           })}
+    //         </React.Fragment>
+    //       ))}
+    //     </div>
+    //   </div>
+
+    //   {/* Alert Modal */}
+    //   {showAlertModal && (
+    //     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    //       <div className="bg-white p-6 rounded-xl text-center">
+    //         <p>{alertMessage}</p>
+    //         <button
+    //           onClick={() => setShowAlertModal(false)}
+    //           className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700"
+    //         >
+    //           OK
+    //         </button>
+    //       </div>
+    //     </div>
+    //   )}
+
+    //   {/* Dish Detail Modal */}
+    //   {selectedDish && (
+    //     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    //       <div className="bg-white rounded-xl p-6 w-full max-w-3xl overflow-auto max-h-[90vh] relative">
+    //         <button
+    //           className="absolute top-4 right-4 text-gray-600 hover:text-gray-900 text-xl"
+    //           onClick={() => setSelectedDish(null)}
+    //         >
+    //           ✕
+    //         </button>
+
+    //         <h2 className="text-2xl font-bold mb-4">{selectedDish.name}</h2>
+
+    //         <div className="flex gap-6 mb-6">
+    //           <div className="flex-1">
+    //             <p className="text-gray-600 mb-2">
+    //               <span className="font-medium">Meal Type:</span>{" "}
+    //               {selectedDish.meal_type}
+    //             </p>
+    //             <p className="text-gray-600 mb-2">
+    //               <span className="font-medium">Goal:</span> {selectedDish.goal}
+    //             </p>
+    //             <p className="text-gray-600 mb-2">
+    //               <span className="font-medium">Dietary Style:</span>{" "}
+    //               {selectedDish.eating_style}
+    //             </p>
+    //           </div>
+    //           <div className="flex-1">
+    //             {selectedDish.description && (
+    //               <div>
+    //                 <h3 className="text-lg font-semibold mb-2">Description</h3>
+    //                 <p className="text-gray-600">{selectedDish.description}</p>
+    //               </div>
+    //             )}
+    //           </div>
+    //         </div>
+
+    //         <div className="mb-6">
+    //           <div className="flex items-center justify-between mb-4">
+    //             <h3 className="text-lg font-semibold">
+    //               Ingredients & Nutrition
+    //             </h3>
+    //             <div className="flex items-center space-x-4">
+    //               <label className="flex items-center">
+    //                 <span className="text-sm text-gray-600 mr-2">
+    //                   Serving size:
+    //                 </span>
+    //                 <input
+    //                   type="number"
+    //                   value={
+    //                     selectedDish.servingSize ||
+    //                     selectedDish.default_serving ||
+    //                     100
+    //                   }
+    //                   min="1"
+    //                   className="w-20 px-2 py-1 border rounded"
+    //                   onChange={(e) =>
+    //                     handleServingSizeChange(parseInt(e.target.value) || 100)
+    //                   }
+    //                 />
+    //                 <span className="text-sm text-gray-600 ml-1">g</span>
+    //               </label>
+    //             </div>
+    //           </div>
+
+    //           <div className="bg-emerald-50 rounded-lg p-4 mb-4">
+    //             <h4 className="text-sm font-medium text-emerald-800 mb-2">
+    //               Dish Nutritional Values (calculated from ingredients)
+    //             </h4>
+    //             <div className="grid grid-cols-4 gap-4">
+    //               <div className="bg-white p-3 rounded-lg shadow-sm">
+    //                 <div className="text-sm text-gray-600">Calories</div>
+    //                 <div className="text-lg font-semibold text-emerald-700">
+    //                   {Math.round(
+    //                     selectedDish.total_calories ||
+    //                       selectedDish.base_total_calories ||
+    //                       0
+    //                   )}{" "}
+    //                   kcal
+    //                 </div>
+    //               </div>
+    //               <div className="bg-white p-3 rounded-lg shadow-sm">
+    //                 <div className="text-sm text-gray-600">Protein</div>
+    //                 <div className="text-lg font-semibold text-emerald-700">
+    //                   {Math.round(
+    //                     selectedDish.total_protein ||
+    //                       selectedDish.base_total_protein ||
+    //                       0
+    //                   )}{" "}
+    //                   g
+    //                 </div>
+    //               </div>
+    //               <div className="bg-white p-3 rounded-lg shadow-sm">
+    //                 <div className="text-sm text-gray-600">Carbohydrates</div>
+    //                 <div className="text-lg font-semibold text-emerald-700">
+    //                   {Math.round(
+    //                     selectedDish.total_carbs ||
+    //                       selectedDish.base_total_carbs ||
+    //                       0
+    //                   )}{" "}
+    //                   g
+    //                 </div>
+    //               </div>
+    //               <div className="bg-white p-3 rounded-lg shadow-sm">
+    //                 <div className="text-sm text-gray-600">Fats</div>
+    //                 <div className="text-lg font-semibold text-emerald-700">
+    //                   {Math.round(
+    //                     selectedDish.total_fats ||
+    //                       selectedDish.base_total_fats ||
+    //                       0
+    //                   )}{" "}
+    //                   g
+    //                 </div>
+    //               </div>
+    //             </div>
+    //             <p className="text-xs text-gray-600 mt-2">
+    //               Note: totals are calculated from the dish ingredients (per
+    //               {selectedDish.amountBaseUnit || 100} g of dish). Ingredient
+    //               edits (e.g., rice overrides) will adjust the displayed totals.
+    //               Adjusting serving size scales the dish totals relative to the
+    //               detected baseline.
+    //             </p>
+    //           </div>
+
+    //           <div className="bg-gray-50 rounded-lg overflow-hidden">
+    //             <table className="w-full border-collapse">
+    //               <thead>
+    //                 <tr className="bg-gray-100">
+    //                   <th className="text-left p-3">Ingredient</th>
+    //                   <th className="text-right p-3">Amount</th>
+    //                   <th className="text-right p-3">Calories</th>
+    //                   <th className="text-right p-3">Protein</th>
+    //                   <th className="text-right p-3">Carbs</th>
+    //                   <th className="text-right p-3">Fats</th>
+    //                   <th className="text-left p-3">Allergens</th>
+    //                 </tr>
+    //               </thead>
+    //               <tbody>
+    //                 {(selectedDish.ingredients_dish_id_fkey || []).map(
+    //                   (ingredient) => (
+    //                     <tr
+    //                       key={ingredient.id}
+    //                       className="border-t border-gray-200"
+    //                     >
+    //                       <td className="p-3">{ingredient.name}</td>
+    //                       <td className="text-right p-3">
+    //                         {ingredient.is_rice ? (
+    //                           <>
+    //                             <input
+    //                               type="number"
+    //                               step="0.1"
+    //                               className="w-20 text-right px-1 py-0.5 border rounded"
+    //                               value={ingredient.amount}
+    //                               onChange={(e) =>
+    //                                 handleIngredientAmountChange(
+    //                                   ingredient.id,
+    //                                   e.target.value
+    //                                 )
+    //                               }
+    //                             />{" "}
+    //                             {ingredient.unit || "g"}
+    //                           </>
+    //                         ) : (
+    //                           <span>
+    //                             {ingredient.amount} {ingredient.unit || "g"}
+    //                           </span>
+    //                         )}
+    //                       </td>
+    //                       <td className="text-right p-3">
+    //                         {Math.round(ingredient.calories || 0)}
+    //                       </td>
+    //                       <td className="text-right p-3">
+    //                         {Math.round(ingredient.protein || 0)}g
+    //                       </td>
+    //                       <td className="text-right p-3">
+    //                         {Math.round(ingredient.carbs || 0)}g
+    //                       </td>
+    //                       <td className="text-right p-3">
+    //                         {Math.round(ingredient.fats || 0)}g
+    //                       </td>
+    //                       <td className="p-3 text-red-600">
+    //                         {Array.isArray(ingredient.allergen_id)
+    //                           ? ingredient.allergen_id
+    //                               .map((a) => a.name)
+    //                               .join(", ")
+    //                           : ingredient.allergen_id?.name || ""}
+    //                       </td>
+    //                     </tr>
+    //                   )
+    //                 )}
+    //               </tbody>
+    //             </table>
+    //           </div>
+    //         </div>
+
+    //         {selectedDish.steps?.length > 0 && (
+    //           <div className="mb-6">
+    //             <h3 className="text-lg font-semibold mb-3">
+    //               Preparation Steps
+    //             </h3>
+    //             <ol className="list-decimal ml-6 space-y-2">
+    //               {selectedDish.steps.map((step, idx) => (
+    //                 <li key={idx} className="text-gray-700">
+    //                   {step}
+    //                 </li>
+    //               ))}
+    //             </ol>
+    //           </div>
+    //         )}
+
+    //         <div className="mt-6 flex justify-end gap-3">
+    //           <button
+    //             onClick={() =>
+    //               !isDishAdded(selectedDish.id, selectedDish.planMealType) &&
+    //               handleAddMeal(selectedDish)
+    //             }
+    //             disabled={isDishAdded(
+    //               selectedDish.id,
+    //               selectedDish.planMealType
+    //             )}
+    //             className={
+    //               isDishAdded(selectedDish.id, selectedDish.planMealType)
+    //                 ? "px-4 py-2 bg-gray-300 text-gray-600 rounded-lg cursor-not-allowed"
+    //                 : "px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+    //             }
+    //           >
+    //             {isDishAdded(selectedDish.id, selectedDish.planMealType)
+    //               ? "Already Added"
+    //               : "Add to Meal Log"}
+    //           </button>
+    //           <button
+    //             onClick={() => setSelectedDish(null)}
+    //             className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+    //           >
+    //             Close
+    //           </button>
+    //         </div>
+    //       </div>
+    //     </div>
+    //   )}
+    //   <FooterNav />
+    // </div>
+
+
+  
+  <div className="min-h-screen bg-green-50 flex items-center justify-center px-4 py-6">
+    {/* Main container */}
+    <div className="bg-white w-[375px] h-[700px] rounded-2xl shadow-2xl flex flex-col overflow-hidden relative">
+      
+      {/* HEADER */}
+      <div className="bg-gradient-to-r from-green-500 to-green-400 rounded-t-2xl px-5 pt-6 pb-4 shadow-lg">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4">
+          {/* Left side: Title */}
+          <h1 className="text-2xl font-extrabold text-white tracking-wide">
+            Your Personalized Meal Plan
+          </h1>
+          <div className="mt-1 sm:mt-0 text-green-100 text-sm sm:text-base font-medium sm:text-right">
+            {weeklyPlan?.start_date && weeklyPlan?.end_date && (
+              <p>
+                {new Date(weeklyPlan.start_date).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                })}{" "}
+                –{" "}
+                {new Date(weeklyPlan.end_date).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                })}
               </p>
-              <p className="text-sm text-gray-600">
-                Eating Style:{" "}
-                <span className="font-medium">{profile.eating_style}</span>
-              </p>
-              <p className="text-sm text-gray-600">
-                Meals per Day:{" "}
-                <span className="font-medium">
-                  {profile.meals_per_day || 3}
-                </span>
-              </p>
-              <p className="text-sm text-gray-600">
-                Plan Duration:{" "}
-                <span className="font-medium">
-                  {profile.timeframe || 7} days
-                </span>
-              </p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600">
-                Protein:{" "}
-                <span className="font-medium">
-                  {Math.round(profile.protein_needed)}g
-                </span>
-              </p>
-              <p className="text-sm text-gray-600">
-                Carbs:{" "}
-                <span className="font-medium">
-                  {Math.round(profile.carbs_needed)}g
-                </span>
-              </p>
-              <p className="text-sm text-gray-600">
-                Fats:{" "}
-                <span className="font-medium">
-                  {Math.round(profile.fats_needed)}g
-                </span>
-              </p>
-            </div>
+            )}
+            <p className="text-xs sm:text-sm text-green-200">
+              ({profile.timeframe || 7} Days)
+            </p>
           </div>
         </div>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        {/* Two-column layout: Meal Types and Days */}
-        <div className="grid grid-cols-[200px_1fr]">
-          {/* Left column - Meal Types */}
-          <div className="bg-gray-50 border-r">
-            {["Breakfast", "Lunch", "Dinner", "Snack"].map(
-              (mealType, index) => (
-                <div
-                  key={mealType}
-                  className={`p-4 ${
-                    index !== 3 ? "border-b" : ""
-                  } hover:bg-emerald-50 transition-colors cursor-pointer`}
-                >
-                  <div className="font-semibold text-gray-700">{mealType}</div>
-                </div>
-              )
-            )}
-          </div>
+      {/* SCROLLABLE CONTENT */}
+      <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-green-200 scrollbar-track-green-50 p-4 pb-24">
+        {/* GRID CONTAINER */}
+        <div className="bg-white rounded-2xl shadow-inner border border-green-100 overflow-auto">
+          <div
+            className="grid text-sm md:text-base"
+            style={{
+              gridTemplateColumns: `140px repeat(${weeklyPlan?.plan?.length || 0}, 160px)`,
+              minWidth: weeklyPlan?.plan?.length
+                ? `${140 + 160 * weeklyPlan.plan.length}px`
+                : "100%",
+            }}
+          >
+            {/* Empty Corner */}
+            <div className="bg-green-600 rounded-tl-2xl h-[72px] border-r border-green-500" />
 
-          {/* Right column - Days and Dishes */}
-          <div className="overflow-x-auto">
-            <div className="min-w-[600px]">
-              {/* Days header */}
-              <div
-                className="grid gap-4 p-4 border-b bg-emerald-600"
-                style={{
-                  gridTemplateColumns: `repeat(${weeklyPlan.length}, 1fr)`,
-                }}
-              >
-                {weeklyPlan.map((dayPlan, dayIndex) => {
-                  const date = new Date();
-                  date.setDate(date.getDate() + dayIndex);
-                  const dayName = date.toLocaleDateString("en-US", {
-                    weekday: "short",
-                  });
-                  const dayNum = date.getDate();
+            {/* Day Headers */}
+            {weeklyPlan?.plan?.map((dayPlan, i) => {
+              const date = new Date(dayPlan.date);
+              const dayName = date.toLocaleDateString("en-US", { weekday: "short" });
+              return (
+                <div
+                  key={i}
+                  className="bg-green-600 text-white text-center py-3 font-semibold border-l border-green-500 sticky top-0 z-20"
+                >
+                  <div>{dayName}</div>
+                  <div className="text-xs text-green-100">
+                    {date.toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Meal Rows */}
+            {["Breakfast", "Lunch", "Dinner", "Snack"].map((mealType) => (
+              <React.Fragment key={mealType}>
+                {/* Sticky Left Labels */}
+                <div className="bg-green-50 border-t border-green-100 px-3 py-2 font-semibold text-green-700 text-sm sticky left-0 z-30">
+                  {mealType}
+                </div>
+
+                {/* Meal Cells */}
+                {weeklyPlan?.plan?.map((dayPlan, j) => {
+                  const meal = dayPlan.meals.find((m) => m.type === mealType);
                   return (
-                    <div key={dayIndex} className="text-white text-center">
-                      <div className="font-semibold">{dayName}</div>
-                      <div className="text-sm">Day {dayNum}</div>
+                    <div
+                      key={j}
+                      className="border-t border-l border-green-100 p-3 flex items-start justify-center min-h-[140px] transition-all duration-300 hover:bg-green-50"
+                    >
+                      {meal ? (
+                        <div
+                          onClick={() => !meal.added && handleOpenDish(meal)}
+                          className={`relative w-full max-w-[140px] p-2 text-center rounded-xl border transition-all duration-200 flex flex-col items-center ${
+                            meal.added
+                              ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                              : "bg-white hover:shadow-md hover:border-green-300 text-gray-700 cursor-pointer"
+                          }`}
+                        >
+                          <div className="w-24 h-24 sm:w-28 sm:h-28 mb-2 rounded-lg overflow-hidden flex items-center justify-center bg-green-50 text-gray-400 text-xs">
+                            {meal.image_url ? (
+                              <img
+                                src={meal.image_url}
+                                alt={meal.name || "Dish"}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <span className="text-xs">No Image</span>
+                            )}
+                          </div>
+                          <p className="text-sm font-medium truncate text-green-700 w-full">{meal.name}</p>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {Math.round(meal.total_calories || 0)} kcal • {Math.round(meal.total_protein || 0)}g
+                          </p>
+                          {meal.added && (
+                            <span className="absolute top-2 right-2 text-[10px] bg-green-100 text-green-700 px-2 py-[2px] rounded-full">
+                              ✓ Added
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-gray-400 text-xs flex items-center justify-center h-full w-full bg-white rounded-xl border border-dashed border-green-200">
+                          No meal
+                        </div>
+                      )}
                     </div>
                   );
                 })}
-              </div>
-
-              {/* Meals Grid */}
-              <div className="divide-y">
-                {["Breakfast", "Lunch", "Dinner", "Snack"].map((mealType) => (
-                  <div key={mealType} className="p-4">
-                    <div
-                      className="grid gap-4"
-                      style={{
-                        gridTemplateColumns: `repeat(${weeklyPlan.length}, 1fr)`,
-                      }}
-                    >
-                      {weeklyPlan.map((dayPlan, dayIndex) => {
-                        const meal = dayPlan.meals.find(
-                          (m) => m.type === mealType
-                        );
-                        return (
-                          <div key={dayIndex} className="relative">
-                            {meal ? (
-                              <div
-                                onClick={() =>
-                                  !meal.added && handleOpenDish(meal)
-                                }
-                                className={`
-                                  cursor-pointer rounded-lg p-3 transition-colors
-                                  ${
-                                    meal.added
-                                      ? "bg-gray-100 text-gray-400"
-                                      : "bg-white hover:bg-emerald-50 text-emerald-700 shadow-sm"
-                                  }
-                                `}
-                              >
-                                <div className="aspect-video bg-gray-200 mb-2 rounded flex items-center justify-center text-gray-500 text-sm">
-                                  No Image
-                                </div>
-                                <p className="text-sm font-medium truncate">
-                                  {meal.name}
-                                </p>
-                                <div className="mt-2 text-xs text-gray-500 space-x-2">
-                                  <span>
-                                    {Math.round(meal.total_calories || 0)} kcal
-                                  </span>
-                                  <span>•</span>
-                                  <span>
-                                    {Math.round(meal.total_protein || 0)}g
-                                    protein
-                                  </span>
-                                </div>
-                                {meal.added && (
-                                  <span className="absolute top-2 right-2 text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded">
-                                    Added
-                                  </span>
-                                )}
-                              </div>
-                            ) : (
-                              <div className="h-[160px] flex items-center justify-center text-gray-400 text-sm bg-white rounded-lg border border-gray-100">
-                                No meal planned
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+              </React.Fragment>
+            ))}
           </div>
         </div>
 
-        {/* Plan Totals */}
-        <div className="border-t mt-8 p-4 bg-gray-50 rounded-lg">
-          <h4 className="text-sm font-medium text-gray-700 mb-3">
-            Plan Totals ({profile.timeframe || 7} Days)
-          </h4>
-          <div className="grid grid-cols-4 gap-4">
-            <div className="bg-white p-3 rounded-lg shadow-sm">
-              <div className="text-sm text-gray-600">Calories</div>
-              <div className="text-lg font-semibold text-emerald-700">
-                {Math.round(
-                  weeklyPlan
-                    .slice(0, 7)
-                    .reduce((sum, day) => sum + (day.totals.calories || 0), 0)
-                )}{" "}
-                kcal
-              </div>
-              <div className="text-xs text-gray-500 mt-1">
-                Daily avg:{" "}
-                {Math.round(
-                  weeklyPlan.reduce(
-                    (sum, day) => sum + (day.totals.calories || 0),
-                    0
-                  ) / (profile.timeframe || 7)
-                )}{" "}
-                kcal
-              </div>
-            </div>
-            <div className="bg-white p-3 rounded-lg shadow-sm">
-              <div className="text-sm text-gray-600">Protein</div>
-              <div className="text-lg font-semibold text-emerald-700">
-                {Math.round(
-                  weeklyPlan.reduce(
-                    (sum, day) => sum + (day.totals.protein || 0),
-                    0
-                  )
-                )}
-                g
-              </div>
-              <div className="text-xs text-gray-500 mt-1">
-                Daily avg:{" "}
-                {Math.round(
-                  weeklyPlan.reduce(
-                    (sum, day) => sum + (day.totals.protein || 0),
-                    0
-                  ) / (profile.timeframe || 7)
-                )}
-                g
-              </div>
-            </div>
-            <div className="bg-white p-3 rounded-lg shadow-sm">
-              <div className="text-sm text-gray-600">Carbs</div>
-              <div className="text-lg font-semibold text-emerald-700">
-                {Math.round(
-                  weeklyPlan.reduce(
-                    (sum, day) => sum + (day.totals.carbs || 0),
-                    0
-                  )
-                )}
-                g
-              </div>
-              <div className="text-xs text-gray-500 mt-1">
-                Daily avg:{" "}
-                {Math.round(
-                  weeklyPlan.reduce(
-                    (sum, day) => sum + (day.totals.carbs || 0),
-                    0
-                  ) / (profile.timeframe || 7)
-                )}
-                g
-              </div>
-            </div>
-            <div className="bg-white p-3 rounded-lg shadow-sm">
-              <div className="text-sm text-gray-600">Fats</div>
-              <div className="text-lg font-semibold text-emerald-700">
-                {Math.round(
-                  weeklyPlan.reduce(
-                    (sum, day) => sum + (day.totals.fat || 0),
-                    0
-                  )
-                )}
-                g
-              </div>
-              <div className="text-xs text-gray-500 mt-1">
-                Daily avg:{" "}
-                {Math.round(
-                  weeklyPlan.reduce(
-                    (sum, day) => sum + (day.totals.fat || 0),
-                    0
-                  ) / (profile.timeframe || 7)
-                )}
-                g
-              </div>
+        {/* ALERT MODAL */}
+        {showAlertModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white p-6 rounded-xl text-center shadow-xl border border-green-100 max-w-sm w-full">
+              <p className="text-gray-700 font-medium">{alertMessage}</p>
+              <button
+                onClick={() => setShowAlertModal(false)}
+                className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+              >
+                OK
+              </button>
             </div>
           </div>
-        </div>
-      </div>
+        )}
 
-      {showAlertModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white p-6 rounded-xl text-center">
-            <p>{alertMessage}</p>
-            <button
-              onClick={() => setShowAlertModal(false)}
-              className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700"
-            >
-              OK
-            </button>
-          </div>
-        </div>
-      )}
+        {/* SELECTED DISH MODAL */}
+        {selectedDish && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl p-6 w-full max-w-3xl overflow-auto max-h-[90vh] relative shadow-2xl border border-green-100">
+              <button
+                className="absolute top-4 right-4 text-gray-600 hover:text-gray-900 text-xl"
+                onClick={() => setSelectedDish(null)}
+              >
+                ✕
+              </button>
 
-      {/* Dish Detail Modal */}
-      {selectedDish && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-3xl overflow-auto max-h-[90vh] relative">
-            <button
-              className="absolute top-4 right-4 text-gray-600 hover:text-gray-900 text-xl"
-              onClick={() => setSelectedDish(null)}
-            >
-              ✕
-            </button>
+              <h2 className="text-2xl font-bold mb-4">{selectedDish.name}</h2>
 
-            <h2 className="text-2xl font-bold mb-4">{selectedDish.name}</h2>
-
-            <div className="flex gap-6 mb-6">
+              <div className="flex gap-6 mb-6">
               <div className="flex-1">
                 <p className="text-gray-600 mb-2">
                   <span className="font-medium">Meal Type:</span>{" "}
@@ -1440,6 +1730,70 @@ export default function Mealplan({ userId }) {
               </div>
             </div>
 
+            {/* Where to buy in Bohol */}
+            <div className="mb-6 bg-white rounded-xl border border-green-100 p-4">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
+                <h3 className="text-lg font-semibold text-green-700">Where to buy (Bohol)</h3>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="text-sm text-gray-700">
+                    City/Municipality
+                    <select
+                      className="ml-2 border rounded px-2 py-1 text-sm"
+                      value={selectedCityId}
+                      onChange={(e) => setSelectedCityId(e.target.value)}
+                    >
+                      {boholCities.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    {[
+                      { id: "supermarket", label: "Supermarket" },
+                      { id: "public_market", label: "Public Market" },
+                    ].map((t) => {
+                      const active = storeTypeFilters.includes(t.id);
+                      return (
+                        <button
+                          key={t.id}
+                          onClick={() =>
+                            setStoreTypeFilters((prev) =>
+                              active ? prev.filter((x) => x !== t.id) : [...prev, t.id]
+                            )
+                          }
+                          className={`px-3 py-1 rounded-full text-sm border ${
+                            active ? "bg-green-600 text-white border-green-600" : "bg-white text-gray-700 border-green-200"
+                          }`}
+                        >
+                          {t.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-3">
+                {storeRecommendations.map((rec) => (
+                  <div key={rec.ingredient.id || rec.ingredient.name} className="border rounded-lg p-3 border-green-100">
+                    <div className="text-sm font-medium text-gray-800 mb-2">{rec.ingredient.name}</div>
+                    {rec.stores.length ? (
+                      <ul className="text-sm text-gray-700 list-disc list-inside space-y-1">
+                        {rec.stores.map((s) => (
+                          <li key={s.id}>
+                            <span className="font-medium">{s.name}</span>
+                            <span className="ml-2 text-xs text-gray-500">{s.type === "public_market" ? "Public Market" : "Supermarket"}</span>
+                            {s.address ? <span className="ml-2 text-xs text-gray-500">{s.address}</span> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="text-sm text-gray-500">No suggestions for this city. Try removing filters.</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
             {selectedDish.steps?.length > 0 && (
               <div className="mb-6">
                 <h3 className="text-lg font-semibold mb-3">
@@ -1482,10 +1836,293 @@ export default function Mealplan({ userId }) {
                 Close
               </button>
             </div>
+            </div>
           </div>
-        </div>
-      )}
-      <FooterNav />
+        )}
+      </div>
+
+      {/* FIXED FOOTER */}
+      <div className="border-t border-green-100 bg-white p-2 shadow-inner z-40">
+        <FooterNav />
+      </div>
     </div>
-  );
+  </div>
+);
+
+
 }
+
+
+
+
+
+
+// return (
+//   <div className="min-h-screen bg-green-50 flex items-center justify-center px-4 py-6">
+//     <div className="bg-white w-[375px] h-[700px] rounded-2xl shadow-2xl flex flex-col overflow-hidden relative">
+      
+//       {/* Scrollable Section */}
+//       <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-green-200 scrollbar-track-green-50 p-4">
+        
+//         {/* Header */}
+//         <div className="mb-6 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 bg-gradient-to-r from-green-600 to-green-400 text-white rounded-xl p-4 shadow-md">
+//           <h1 className="text-lg md:text-xl font-bold flex items-center gap-2">
+//             <FaUtensils className="text-white text-xl md:text-2xl" />
+//             <span>
+//               Your Personalized Meal Plan
+//               <span className="block text-sm font-normal text-green-100">
+//                 ({profile.timeframe || 7} Days)
+//               </span>
+//             </span>
+//           </h1>
+//           {weeklyPlan?.start_date && weeklyPlan?.end_date && (
+//             <p className="text-xs sm:text-sm text-green-100 mt-2 sm:mt-0">
+//               {new Date(weeklyPlan.start_date).toLocaleDateString("en-US", {
+//                 month: "short",
+//                 day: "numeric",
+//               })}{" "}
+//               –{" "}
+//               {new Date(weeklyPlan.end_date).toLocaleDateString("en-US", {
+//                 month: "short",
+//                 day: "numeric",
+//               })}
+//             </p>
+//           )}
+//         </div>
+
+//         {/* Plan Grid */}
+//         <div className="bg-white rounded-2xl shadow-inner border border-green-100 overflow-x-auto">
+//           <div
+//             className="grid min-w-max text-sm md:text-base"
+//             style={{
+//               gridTemplateColumns: `140px repeat(${weeklyPlan?.plan?.length || 0}, 1fr)`,
+//             }}
+//           >
+//             {/* Empty Corner */}
+//             <div className="bg-green-600 rounded-tl-2xl"></div>
+
+//             {/* 🗓️ Day Headers */}
+//             {weeklyPlan?.plan?.map((dayPlan, i) => {
+//               const date = new Date(dayPlan.date);
+//               const dayName = date.toLocaleDateString("en-US", { weekday: "short" });
+//               return (
+//                 <div
+//                   key={i}
+//                   className="bg-green-600 text-white text-center py-3 font-semibold border-l border-green-500"
+//                 >
+//                   <div>{dayName}</div>
+//                   <div className="text-xs text-green-100">
+//                     {date.toLocaleDateString("en-US", {
+//                       month: "short",
+//                       day: "numeric",
+//                     })}
+//                   </div>
+//                 </div>
+//               );
+//             })}
+
+//             {/* 🍽️ Meal Rows */}
+//             {["Breakfast", "Lunch", "Dinner", "Snack"].map((mealType) => (
+//               <React.Fragment key={mealType}>
+//                 <div className="bg-green-50 border-t border-green-100 px-3 py-2 font-semibold text-green-700 text-sm sticky left-0 z-10">
+//                   {mealType}
+//                 </div>
+
+//                 {weeklyPlan?.plan?.map((dayPlan, j) => {
+//                   const meal = dayPlan.meals.find((m) => m.type === mealType);
+//                   return (
+//                     <div
+//                       key={j}
+//                       className="border-t border-l border-green-100 p-2 flex flex-col items-center justify-center min-h-[140px] md:min-h-[160px] lg:min-h-[180px] transition-all duration-300 hover:bg-green-50"
+//                     >
+//                       {meal ? (
+//                         <div
+//                           onClick={() => !meal.added && handleOpenDish(meal)}
+//                           className={`relative w-full max-w-[120px] sm:max-w-[150px] p-2 text-center rounded-xl border transition-all duration-200 ${
+//                             meal.added
+//                               ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+//                               : "bg-white hover:shadow-md hover:border-green-300 text-gray-700 cursor-pointer"
+//                           }`}
+//                         >
+//                           <div className="w-24 h-24 sm:w-28 sm:h-28 mx-auto mb-2 rounded-lg overflow-hidden flex items-center justify-center bg-green-50 text-gray-400 text-xs">
+//                             {meal.image_url ? (
+//                               <img
+//                                 src={meal.image_url}
+//                                 alt={meal.name || "Dish"}
+//                                 className="w-full h-full object-cover"
+//                               />
+//                             ) : (
+//                               <span>No Image</span>
+//                             )}
+//                           </div>
+//                           <p className="text-sm font-medium truncate text-green-700">{meal.name}</p>
+//                           <p className="text-xs text-gray-500 mt-1">
+//                             {Math.round(meal.total_calories || 0)} kcal •{" "}
+//                             {Math.round(meal.total_protein || 0)}g
+//                           </p>
+//                           {meal.added && (
+//                             <span className="absolute top-2 right-2 text-[10px] bg-green-100 text-green-700 px-2 py-[2px] rounded-full animate-fadeIn">
+//                               ✓ Added
+//                             </span>
+//                           )}
+//                         </div>
+//                       ) : (
+//                         <div className="text-gray-400 text-xs flex items-center justify-center h-full w-full bg-white rounded-xl border border-dashed border-green-200">
+//                           No meal
+//                         </div>
+//                       )}
+//                     </div>
+//                   );
+//                 })}
+//               </React.Fragment>
+//             ))}
+//           </div>
+//         </div>
+
+//         {/* ⚠️ Alert Modal */}
+//         {showAlertModal && (
+//           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+//             <div className="bg-white p-6 rounded-xl text-center shadow-xl border border-green-100 max-w-sm w-full">
+//               <p className="text-gray-700 font-medium">{alertMessage}</p>
+//               <button
+//                 onClick={() => setShowAlertModal(false)}
+//                 className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+//               >
+//                 OK
+//               </button>
+//             </div>
+//           </div>
+//         )}
+
+//         {/* 🍲 Dish Modal */}
+//         {selectedDish && (
+//           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+//             <div className="bg-white rounded-2xl p-6 w-full max-w-3xl overflow-auto max-h-[90vh] relative shadow-2xl border border-green-100">
+//               <button
+//                 className="absolute top-4 right-4 text-gray-600 hover:text-green-600 text-xl"
+//                 onClick={() => setSelectedDish(null)}
+//               >
+//                 ✕
+//               </button>
+
+//               <h2 className="text-2xl font-bold mb-4 text-green-700">{selectedDish.name}</h2>
+
+//               <div className="flex flex-col md:flex-row gap-6 mb-6">
+//                 <div className="flex-1 bg-green-50 p-4 rounded-xl border border-green-100">
+//                   <p className="text-gray-600 mb-2">
+//                     <span className="font-semibold text-green-700">Meal Type:</span>{" "}
+//                     {selectedDish.meal_type}
+//                   </p>
+//                   <p className="text-gray-600 mb-2">
+//                     <span className="font-semibold text-green-700">Goal:</span>{" "}
+//                     {selectedDish.goal}
+//                   </p>
+//                   <p className="text-gray-600 mb-2">
+//                     <span className="font-semibold text-green-700">Dietary Style:</span>{" "}
+//                     {selectedDish.eating_style}
+//                   </p>
+//                 </div>
+
+//                 {selectedDish.description && (
+//                   <div className="flex-1 bg-white p-4 rounded-xl border border-green-100">
+//                     <h3 className="text-lg font-semibold text-green-700 mb-2">Description</h3>
+//                     <p className="text-gray-600">{selectedDish.description}</p>
+//                   </div>
+//                 )}
+//               </div>
+
+//               {/* Nutrition Section */}
+//               <div className="bg-green-50 p-4 rounded-xl border border-green-100 mb-6">
+//                 <div className="flex flex-wrap justify-between items-center mb-3 gap-3">
+//                   <h3 className="text-lg font-semibold text-green-700">
+//                     Ingredients & Nutrition
+//                   </h3>
+//                   <label className="flex items-center space-x-2 text-sm">
+//                     <span className="text-gray-600">Serving size:</span>
+//                     <input
+//                       type="number"
+//                       value={
+//                         selectedDish.servingSize ||
+//                         selectedDish.default_serving ||
+//                         100
+//                       }
+//                       min="1"
+//                       className="w-20 px-2 py-1 border rounded text-gray-700"
+//                       onChange={(e) =>
+//                         handleServingSizeChange(parseInt(e.target.value) || 100)
+//                       }
+//                     />
+//                     <span className="text-gray-600">g</span>
+//                   </label>
+//                 </div>
+
+//                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+//                   {[
+//                     ["Calories", selectedDish.total_calories || 0, "kcal"],
+//                     ["Protein", selectedDish.total_protein || 0, "g"],
+//                     ["Carbs", selectedDish.total_carbs || 0, "g"],
+//                     ["Fats", selectedDish.total_fats || 0, "g"],
+//                   ].map(([label, value, unit], idx) => (
+//                     <div
+//                       key={idx}
+//                       className="bg-white rounded-lg shadow-sm p-3 border border-green-100 text-center"
+//                     >
+//                       <div className="text-sm text-gray-600">{label}</div>
+//                       <div className="text-lg font-semibold text-green-700">
+//                         {Math.round(value)} {unit}
+//                       </div>
+//                     </div>
+//                   ))}
+//                 </div>
+//               </div>
+
+//               {selectedDish.steps?.length > 0 && (
+//                 <div className="mb-6 bg-white p-4 rounded-xl border border-green-100">
+//                   <h3 className="text-lg font-semibold mb-3 text-green-700">
+//                     Preparation Steps
+//                   </h3>
+//                   <ol className="list-decimal ml-6 space-y-2 text-gray-700">
+//                     {selectedDish.steps.map((step, idx) => (
+//                       <li key={idx}>{step}</li>
+//                     ))}
+//                   </ol>
+//                 </div>
+//               )}
+
+//               <div className="mt-6 flex flex-wrap justify-end gap-3">
+//                 <button
+//                   onClick={() =>
+//                     !isDishAdded(selectedDish.id, selectedDish.planMealType) &&
+//                     handleAddMeal(selectedDish)
+//                   }
+//                   disabled={isDishAdded(selectedDish.id, selectedDish.planMealType)}
+//                   className={`px-4 py-2 rounded-lg transition-colors ${
+//                     isDishAdded(selectedDish.id, selectedDish.planMealType)
+//                       ? "bg-gray-300 text-gray-600 cursor-not-allowed"
+//                       : "bg-green-600 text-white hover:bg-green-700"
+//                   }`}
+//                 >
+//                   {isDishAdded(selectedDish.id, selectedDish.planMealType)
+//                     ? "Already Added"
+//                     : "Add to Meal Log"}
+//                 </button>
+//                 <button
+//                   onClick={() => setSelectedDish(null)}
+//                   className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+//                 >
+//                   Close
+//                 </button>
+//               </div>
+//             </div>
+//           </div>
+//         )}
+//       </div>
+
+//       {/* Footer (Fixed inside white container) */}
+//       <div className="border-t border-green-100 bg-white p-2">
+//         <FooterNav />
+//       </div>
+//     </div>
+//   </div>
+// );
+

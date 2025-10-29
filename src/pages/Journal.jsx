@@ -2,8 +2,9 @@ import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { supabase } from "../supabaseClient";
 import { useNavigate } from "react-router-dom";
 import { FiCalendar, FiTrash2 } from "react-icons/fi";
+import { FaTrashAlt } from "react-icons/fa";
 import FooterNav from "../components/FooterNav";
-// ✅ Safe date conversion
+
 const getLocalDateString = (date) => {
   const d = date instanceof Date ? date : new Date(date);
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
@@ -21,26 +22,34 @@ const getWeekDays = (date) => {
   });
 };
 
+// Optional emoji mapping for workouts
+const emojiMap = {
+  Cardio: "🏃",
+  Strength: "🏋️",
+  Yoga: "🧘",
+  Default: "🏋️",
+};
+
 export default function Journal() {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(null);
   const [mealLog, setMealLog] = useState([]);
+  const [workoutLog, setWorkoutLog] = useState([]);
   const [selectedDay, setSelectedDay] = useState(new Date());
   const [mealTypeFilter, setMealTypeFilter] = useState("");
   const ITEMS_PER_PAGE = 6;
   const [logPage, setLogPage] = useState(0);
 
-  // ✅ Fetch profile + meal logs
+  // ✅ Fetch profile + meals + workouts with workout type names
   const fetchData = useCallback(async () => {
     const {
       data: { user },
       error: userErr,
     } = await supabase.auth.getUser();
-
     if (userErr || !user) return navigate("/login");
 
     try {
-      const [profileRes, mealRes] = await Promise.all([
+      const [profileRes, mealRes, workoutRes] = await Promise.all([
         supabase
           .from("health_profiles")
           .select("calorie_needs, protein_needed, fats_needed, carbs_needed")
@@ -48,13 +57,31 @@ export default function Journal() {
           .single(),
         supabase
           .from("meal_logs")
-          .select("id, meal_type, calories, protein, fat, carbs, meal_date, dish_name, serving_label")
+          .select(
+            "id, meal_type, calories, protein, fat, carbs, meal_date, dish_name, serving_label"
+          )
           .eq("user_id", user.id)
           .order("meal_date", { ascending: true }),
+        supabase
+          .from("workouts")
+          .select(
+            `
+            id,
+            duration,
+            calories_burned,
+            fat_burned,
+            carbs_burned,
+            created_at,
+            workout_types!inner(name)
+          `
+          )
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: true }),
       ]);
 
       setProfile(profileRes.data ?? null);
       setMealLog(mealRes.data ?? []);
+      setWorkoutLog(workoutRes.data ?? []);
     } catch (err) {
       console.error("Data fetch failed:", err);
     }
@@ -69,13 +96,22 @@ export default function Journal() {
     const dayStr = getLocalDateString(selectedDay);
     return mealLog.filter((m) => {
       const mealDateStr = getLocalDateString(m.meal_date);
-      return mealDateStr === dayStr && (!mealTypeFilter || m.meal_type === mealTypeFilter);
+      return (
+        mealDateStr === dayStr &&
+        (!mealTypeFilter || m.meal_type === mealTypeFilter)
+      );
     });
   }, [mealLog, selectedDay, mealTypeFilter]);
-  
+
+  const filteredWorkoutLogs = useMemo(() => {
+    const dayStr = getLocalDateString(selectedDay);
+    return workoutLog.filter(
+      (w) => getLocalDateString(w.created_at) === dayStr
+    );
+  }, [workoutLog, selectedDay]);
 
   // ✅ Totals
-  const totals = useMemo(
+  const totalsMeals = useMemo(
     () =>
       filteredMealLogs.reduce(
         (a, m) => ({
@@ -89,39 +125,62 @@ export default function Journal() {
     [filteredMealLogs]
   );
 
-  // ✅ Delete meal
+  const totalsWorkout = useMemo(
+    () =>
+      filteredWorkoutLogs.reduce(
+        (a, w) => ({
+          calories: a.calories + (w.calories_burned || 0),
+          fat: a.fat + (w.fat_burned || 0),
+          carbs: a.carbs + (w.carbs_burned || 0),
+          duration: a.duration + (w.duration || 0),
+        }),
+        { calories: 0, fat: 0, carbs: 0, duration: 0 }
+      ),
+    [filteredWorkoutLogs]
+  );
+
+  // ✅ Delete functions
   const handleDeleteMeal = async (id) => {
     const { error } = await supabase.from("meal_logs").delete().eq("id", id);
-    if (error) {
-      alert("Failed to delete: " + error.message);
-    } else {
-      setMealLog((prev) => prev.filter((m) => m.id !== id));
-    }
+    if (!error) setMealLog((prev) => prev.filter((m) => m.id !== id));
   };
 
-  const paginatedLogs = filteredMealLogs.slice(
+  const handleDeleteWorkout = async (id) => {
+    const { error } = await supabase.from("workouts").delete().eq("id", id);
+    if (!error) setWorkoutLog((prev) => prev.filter((w) => w.id !== id));
+  };
+
+  // ✅ Pagination
+  const paginatedMealLogs = filteredMealLogs.slice(
+    logPage * ITEMS_PER_PAGE,
+    logPage * ITEMS_PER_PAGE + ITEMS_PER_PAGE
+  );
+  const paginatedWorkoutLogs = filteredWorkoutLogs.slice(
     logPage * ITEMS_PER_PAGE,
     logPage * ITEMS_PER_PAGE + ITEMS_PER_PAGE
   );
 
-  // ✅ UI
   return (
     <div className="min-h-screen bg-green-50 flex items-center justify-center px-4 py-6">
-      <div className="bg-white w-[375px] h-[700px] rounded-2xl shadow-2xl overflow-auto flex flex-col">
+      <div className="bg-white w-[375px] h-[700px] rounded-2xl shadow-2xl flex flex-col overflow-hidden relative">
         {/* Header */}
         <div className="bg-gradient-to-r from-green-500 to-green-400 rounded-t-2xl px-5 pt-6 pb-4 shadow-lg">
           <div className="flex justify-between items-center mb-2">
-            <span className="text-2xl font-extrabold text-white">SmartGenie</span>
+            <span className="text-2xl font-extrabold text-white">
+              SmartGenie
+            </span>
             <FiCalendar size={22} className="text-white" />
           </div>
           <div className="text-right text-white font-semibold text-sm mb-3">
-            {selectedDay.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+            {selectedDay.toLocaleDateString("en-US", {
+              month: "long",
+              year: "numeric",
+            })}
           </div>
-
-          {/* Week days */}
           <div className="flex justify-between gap-1 overflow-x-auto pb-1">
             {getWeekDays(selectedDay).map((d) => {
-              const isSel = getLocalDateString(d) === getLocalDateString(selectedDay);
+              const isSel =
+                getLocalDateString(d) === getLocalDateString(selectedDay);
               return (
                 <button
                   key={d}
@@ -157,7 +216,7 @@ export default function Journal() {
               value={mealTypeFilter}
               onChange={(e) => setMealTypeFilter(e.target.value)}
             >
-              <option value="">All</option>
+              <option value="">All Meals</option>
               <option>Breakfast</option>
               <option>Lunch</option>
               <option>Dinner</option>
@@ -166,18 +225,27 @@ export default function Journal() {
           </div>
 
           {/* Totals */}
-          <div className="bg-green-100 p-3 rounded-lg shadow-inner text-sm font-medium flex justify-between">
-            <span>Calories</span>
+          <div className="bg-green-100 p-3 rounded-lg shadow-inner text-sm font-small flex justify-between">
+            <span className="font-semibold text-gray-800">Calories Consumed</span>
             <span>
-              {totals.calories} / {profile?.calorie_needs || 0} kcal
+              {totalsMeals.calories} / {profile?.calorie_needs || 0} kcal
+            </span>
+          </div>
+          <div className="bg-green-100 p-3 rounded-lg shadow-inner text-sm font-small flex justify-between">
+            <span className="font-semibold text-gray-800">Workout Summary</span>
+            <span>
+              {totalsWorkout.calories} kcal | Fat: {totalsWorkout.fat} | Carbs:{" "}
+              {totalsWorkout.carbs} | Duration: {totalsWorkout.duration} min
             </span>
           </div>
 
           {/* Meal Logs */}
           <div>
-            <h3 className="text-lg font-semibold text-green-700 mb-1">Meal Log</h3>
-            {paginatedLogs.length ? (
-              paginatedLogs.map((entry) => (
+            <h3 className="text-lg font-semibold text-green-700 mb-1">
+              Meal and Workouts Logs
+            </h3>
+            {paginatedMealLogs.length ? (
+              paginatedMealLogs.map((entry) => (
                 <div
                   key={entry.id}
                   className="bg-white border border-gray-200 rounded-xl shadow-sm p-3 mb-2 flex justify-between items-center hover:bg-green-50 transition"
@@ -191,20 +259,67 @@ export default function Journal() {
                       {entry.serving_label}
                     </span>
                     <span className="text-xs text-gray-600 mt-1">
-                      Cal: {entry.calories} | P: {entry.protein} | F: {entry.fat} | C: {entry.carbs}
+                      Cal: {entry.calories} | Protein: {entry.protein} | Fat:{" "}
+                      {entry.fat} | Carbs: {entry.carbs}
                     </span>
                   </div>
                   <button
                     onClick={() => handleDeleteMeal(entry.id)}
                     className="text-red-500 hover:text-red-700 p-2 rounded-full"
-                    title="Delete"
                   >
                     <FiTrash2 size={18} />
                   </button>
                 </div>
               ))
             ) : (
-              <p className="text-gray-500 italic text-sm">No meals logged yet.</p>
+              <p className="text-gray-500 italic text-sm">No logged yet.</p>
+            )}
+          </div>
+
+          {/* Workout Logs */}
+          <div>
+            <h3 className="text-lg font-semibold text-green-700 mb-3"></h3>
+            {paginatedWorkoutLogs.length === 0 ? (
+              <p className="text-gray-500"></p>
+            ) : (
+              <div className="space-y-3">
+                {paginatedWorkoutLogs.map((w) => (
+                  <div
+                    key={w.id}
+                    className="border rounded-xl p-3 shadow-sm flex justify-between items-center"
+                  >
+                    <div>
+                      <p className="font-medium flex items-center gap-2">
+                        <span>{emojiMap[w.workout_types?.name] || "🏋️"}</span>
+                        {w.workout_types?.name || "—"}
+                      </p>
+                      <p className="text-sm text-gray-500">
+                        {w.duration} min |{" "}
+                        {new Date(w.created_at).toLocaleDateString()}
+                      </p>
+                      {(w.calories_burned ||
+                        w.fat_burned ||
+                        w.carbs_burned) && (
+                        <p className="text-xs text-gray-400 mt-1">
+                          {w.calories_burned && (
+                            <span>{w.calories_burned} kcal</span>
+                          )}
+                          {w.fat_burned && <span> • {w.fat_burned}g fat</span>}
+                          {w.carbs_burned && (
+                            <span> • {w.carbs_burned}g carbs</span>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => handleDeleteWorkout(w.id)}
+                      className="text-red-600 hover:text-red-800"
+                    >
+                      <FaTrashAlt />
+                    </button>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </div>

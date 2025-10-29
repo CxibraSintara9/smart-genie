@@ -21,6 +21,7 @@ import {
   FaPlus,
   FaUtensils,
 } from "react-icons/fa";
+import { BsCircleFill } from "react-icons/bs";
 
 const PersonalDashboard = React.memo(function PersonalDashboard() {
   const [profile, setProfile] = useState(null);
@@ -35,11 +36,14 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
   const [showMealModal, setShowMealModal] = useState(false);
   const [selectedDish, setSelectedDish] = useState(null);
   const [mealType, setMealType] = useState("");
-  const [servingSize, setServingSize] = useState(1);
+  const [servingSize, setServingSize] = useState(100);
   const [showAlertModal, setShowAlertModal] = useState(false);
   const [alertMessage, setAlertMessage] = useState("");
   const [showDisclaimer, setShowDisclaimer] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [selectedMealType, setSelectedMealType] = useState("");
+  const [allergenOptions, setAllergenOptions] = useState([]);
+  const [showDishPrompt, setShowDishPrompt] = useState(false);
 
   const radius = 52;
   const circumference = 2 * Math.PI * radius;
@@ -89,6 +93,31 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
     checkUserAndDisclaimer();
   }, [navigate]);
 
+  // Encourage user to explore Suggested Dishes (show at most once per day)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const forceShow = params.get("showDishesPrompt") === "1";
+
+    const lastShown = localStorage.getItem("suggestedPromptLastShown");
+    const now = new Date();
+
+    let shouldShow = forceShow;
+    if (!shouldShow) {
+      if (!lastShown) {
+        shouldShow = true;
+      } else {
+        const last = new Date(lastShown);
+        const diffDays = (now - last) / (1000 * 60 * 60 * 24);
+        if (diffDays >= 1) shouldShow = true;
+      }
+    }
+
+    if (shouldShow) {
+      setShowDishPrompt(true);
+      localStorage.setItem("suggestedPromptLastShown", now.toISOString());
+    }
+  }, []);
+
   // -------------------- Fetch Data (Ultra-Optimized) --------------------
   useEffect(() => {
     const fetchData = async () => {
@@ -96,6 +125,7 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
       const {
         data: { user },
       } = await supabase.auth.getUser();
+
       if (!user) {
         setIsLoading(false);
         return;
@@ -103,27 +133,30 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
 
       try {
         // Batch all database queries for better performance
-        const [profileResult, mealResult, workoutResult, dishesResult] = await Promise.all([
-          supabase
-            .from("health_profiles")
-            .select("*")
-            .eq("user_id", user.id)
-            .single(),
-          supabase
-            .from("meal_logs")
-            .select("*")
-            .eq("user_id", user.id)
-            .order("meal_date", { ascending: true }),
-          supabase
-            .from("workouts")
-            .select("calories_burned, fat_burned, carbs_burned")
-            .eq("user_id", user.id),
-          supabase
-            .from("dishes")
-            .select(`
-              id, name
-            `)
-        ]);
+        const [profileResult, mealResult, workoutResult, dishesResult] =
+          await Promise.all([
+            supabase
+              .from("health_profiles")
+              .select("*")
+              .eq("user_id", user.id)
+              .single(),
+            supabase
+              .from("meal_logs")
+              .select("*")
+              .eq("user_id", user.id)
+              .order("meal_date", { ascending: true }),
+            supabase
+              .from("workouts")
+              .select("calories_burned, fat_burned, carbs_burned")
+              .eq("user_id", user.id),
+            supabase.from("dishes").select(`
+        id, name, description, default_serving, meal_type, goal,
+        eating_style, health_condition, steps, image_url,
+        ingredients_dish_id_fkey(
+          id, name, amount, unit, calories, protein, fats, carbs, is_rice,allergen_id
+        )
+      `),
+          ]);
 
         // Handle profile data
         if (!profileResult.error && profileResult.data) {
@@ -149,10 +182,11 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
           setWorkouts(workoutResult.data || []);
         }
 
-        // Handle dishes
+        // Handle dishes and filter by health conditions
         if (dishesResult.error) {
           console.error("Dish fetch error:", dishesResult.error.message);
         } else {
+          // ❗ Don't pre-filter by health conditions here — keep all dishes
           setDishes(dishesResult.data || []);
         }
       } catch (error) {
@@ -164,6 +198,24 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
 
     fetchData();
   }, [navigate]);
+
+  useEffect(() => {
+    const fetchAllergens = async () => {
+      const { data, error } = await supabase.from("allergens").select("*");
+      if (!error && data) setAllergenOptions(data);
+    };
+    fetchAllergens();
+  }, []);
+
+  const userAllergenIds = (profile?.allergens || [])
+    .map((name) => {
+      const match = allergenOptions.find(
+        (a) => a.name.toLowerCase().trim() === name.toLowerCase().trim()
+      );
+      return match?.id;
+    })
+    .filter(Boolean); // only valid IDs
+  // only valid IDs
 
   // -------------------- Nutrition Advice --------------------
   const getNutritionAdvice = (profile) => {
@@ -202,63 +254,182 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
 
   // -------------------- Derived fallbacks (must be before any early return) --------------------
   const derived = React.useMemo(() => {
-    // Derive macros if any are missing using simple defaults
-    const heightCm = Number(profile?.height_cm) || 0;
-    const weightKg = Number(profile?.weight_kg) || 0;
-    if (heightCm <= 0 || weightKg <= 0) return {};
-    const calories = Math.round(25 * weightKg);
+    if (!profile) return {};
+
+    const heightCm = Number(profile.height_cm) || 0;
+    const weightKg = Number(profile.weight_kg) || 0;
+    const age = Number(profile.age) || 25;
+    const gender = profile.gender || "female";
+    const activity = profile.activity_level || "moderate";
+
+    // ✅ Parse goals (works for array or comma-separated string)
+    let goals = [];
+    if (Array.isArray(profile.goals)) {
+      goals = profile.goals.map((g) => g.toLowerCase());
+    } else if (typeof profile.goals === "string") {
+      goals = profile.goals.split(",").map((g) => g.trim().toLowerCase());
+    }
+
+    if (!heightCm || !weightKg) return {};
+
+    // --- Step 1: BMR (Mifflin-St Jeor) ---
+    const bmr =
+      gender === "male"
+        ? 10 * weightKg + 6.25 * heightCm - 5 * age + 5
+        : 10 * weightKg + 6.25 * heightCm - 5 * age - 161;
+
+    // --- Step 2: Activity Multiplier ---
+    const activityMultipliers = {
+      sedentary: 1.2,
+      light: 1.375,
+      moderate: 1.55,
+      active: 1.725,
+      "very active": 1.9,
+    };
+    const tdee = bmr * (activityMultipliers[activity] || 1.55);
+
+    // --- Step 3: Adjust Calories Based on Goals ---
+    let calorieGoal = tdee;
+
+    if (goals.includes("weight loss")) calorieGoal -= 500;
+    if (goals.includes("boost energy")) calorieGoal += 150;
+    if (goals.includes("managing stress")) calorieGoal += 100;
+    if (goals.includes("optimized athletic performance")) calorieGoal += 300;
+
+    // “Improve physical health” & “Eating a balanced diet” = baseline (no change)
+    calorieGoal = Math.round(calorieGoal);
+
+    // --- Step 4: Macro Ratios Based on Goals ---
     let proteinPerc = 0.25,
-      fatPerc = 0.3,
+      carbPerc = 0.5,
+      fatPerc = 0.25;
+
+    if (goals.includes("weight loss")) {
+      proteinPerc = 0.35;
+      carbPerc = 0.4;
+      fatPerc = 0.25;
+    }
+
+    if (
+      goals.includes("boost energy") ||
+      goals.includes("optimized athletic performance")
+    ) {
+      proteinPerc = 0.3;
+      carbPerc = 0.55;
+      fatPerc = 0.15;
+    }
+
+    if (goals.includes("managing stress")) {
+      proteinPerc = 0.25;
       carbPerc = 0.45;
-    const protein = Math.round((calories * proteinPerc) / 4);
-    const fats = Math.round((calories * fatPerc) / 9);
-    const carbs = Math.round((calories * carbPerc) / 4);
-    return { calories, protein, fats, carbs };
+      fatPerc = 0.3;
+    }
+
+    if (
+      goals.includes("eating a balanced diet") ||
+      goals.includes("improve physical health")
+    ) {
+      proteinPerc = 0.25;
+      carbPerc = 0.5;
+      fatPerc = 0.25;
+    }
+
+    // --- Step 5: Convert to Grams ---
+    const protein = Math.round((calorieGoal * proteinPerc) / 4);
+    const carbs = Math.round((calorieGoal * carbPerc) / 4);
+    const fats = Math.round((calorieGoal * fatPerc) / 9);
+
+    return { calories: calorieGoal, protein, carbs, fats };
   }, [profile]);
+
+  useEffect(() => {
+    const saveCalculatedMacros = async () => {
+      if (!profile || !derived.calories) return;
+
+      // Avoid redundant writes
+      if (
+        profile.calorie_needs === derived.calories &&
+        profile.protein_needed === derived.protein &&
+        profile.fats_needed === derived.fats &&
+        profile.carbs_needed === derived.carbs
+      )
+        return;
+
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { error } = await supabase
+        .from("health_profiles")
+        .update({
+          calorie_needs: derived.calories,
+          protein_needed: derived.protein,
+          fats_needed: derived.fats,
+          carbs_needed: derived.carbs,
+        })
+        .eq("user_id", user.id);
+
+      if (error) console.error("❌ Error saving macros:", error.message);
+      else console.log("✅ Macros synced to database");
+    };
+
+    saveCalculatedMacros();
+  }, [derived, profile]);
 
   // -------------------- Totals (Memoized for Performance) --------------------
   const nutritionTotals = useMemo(() => {
     if (!profile) return {};
 
-    const dailyCalories = Number(profile.calorie_needs) || derived.calories || 0;
-    const dailyFats = Number(profile.fats_needed) || derived.fats || 0;
-    const dailyCarbs = Number(profile.carbs_needed) || derived.carbs || 0;
-    const dailyProtein = Number(profile.protein_needed) || derived.protein || 0;
-    const timeframeDays = Number(profile.timeframe) || 1;
+    // ✅ Helper to safely parse numbers
+    const parseSafe = (val, fallback = 0) => {
+      const num = parseFloat(val);
+      return isFinite(num) && !isNaN(num) ? num : fallback;
+    };
 
+    // ✅ Use derived values as fallback
+    const dailyCalories = parseSafe(profile.calorie_needs, derived.calories);
+    const dailyFats = parseSafe(profile.fats_needed, derived.fats);
+    const dailyCarbs = parseSafe(profile.carbs_needed, derived.carbs);
+    const dailyProtein = parseSafe(profile.protein_needed, derived.protein);
+    const timeframeDays = parseSafe(profile.timeframe, 1);
+
+    // ✅ Calculate totals for the timeframe
     const totalCalories = dailyCalories * timeframeDays;
     const totalFats = dailyFats * timeframeDays;
     const totalProtein = dailyProtein * timeframeDays;
     const totalCarbs = dailyCarbs * timeframeDays;
 
+    // ✅ Compute consumed totals (from meals)
     const consumedTotals = mealLog.reduce(
       (acc, meal) => ({
-        calories: acc.calories + (meal.calories || 0),
-        protein: acc.protein + (meal.protein || 0),
-        fats: acc.fats + (meal.fat || 0),
-        carbs: acc.carbs + (meal.carbs || 0),
+        calories: acc.calories + parseSafe(meal.calories),
+        protein: acc.protein + parseSafe(meal.protein),
+        fats: acc.fats + parseSafe(meal.fat),
+        carbs: acc.carbs + parseSafe(meal.carbs),
       }),
       { calories: 0, protein: 0, fats: 0, carbs: 0 }
     );
 
-    // Deduct calories, fats, and carbs burned from workouts
+    // ✅ Compute burned totals (from workouts)
     const burnedTotals = workouts.reduce(
       (acc, workout) => ({
-        calories: acc.calories + (workout.calories_burned || 0),
-        fats: acc.fats + (workout.fat_burned || 0),
-        carbs: acc.carbs + (workout.carbs_burned || 0),
+        calories: acc.calories + parseSafe(workout.calories_burned),
+        fats: acc.fats + parseSafe(workout.fat_burned),
+        carbs: acc.carbs + parseSafe(workout.carbs_burned),
       }),
       { calories: 0, fats: 0, carbs: 0 }
     );
 
-    // netTotals = total 'used' amounts (meals eaten + burned during workouts)
+    // ✅ Combine totals
     const netTotals = {
       calories: consumedTotals.calories + burnedTotals.calories,
-      protein: consumedTotals.protein, // protein isn't typically subtracted by workouts here
+      protein: consumedTotals.protein,
       fats: consumedTotals.fats + burnedTotals.fats,
       carbs: consumedTotals.carbs + burnedTotals.carbs,
     };
 
+    // ✅ Remaining (goal - used)
     const remainingTotals = {
       calories: totalCalories - netTotals.calories,
       protein: totalProtein - netTotals.protein,
@@ -266,23 +437,32 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
       carbs: totalCarbs - netTotals.carbs,
     };
 
+    // ✅ Progress %
     const progressPercent = totalCalories
       ? Math.min(100, Math.round((netTotals.calories / totalCalories) * 100))
       : 0;
 
+    // ✅ Round all final numbers to prevent weird decimals (like 174.1700000002)
+    const roundAll = (obj) =>
+      Object.fromEntries(
+        Object.entries(obj).map(([key, val]) => [key, Math.round(val)])
+      );
+
     return {
-      dailyCalories,
-      dailyFats,
-      dailyCarbs,
-      dailyProtein,
-      totalCalories,
-      totalFats,
-      totalProtein,
-      totalCarbs,
-      consumedTotals,
-      netTotals,
-      remainingTotals,
-      progressPercent
+      dailyCalories: Math.round(dailyCalories),
+      dailyFats: Math.round(dailyFats),
+      dailyCarbs: Math.round(dailyCarbs),
+      dailyProtein: Math.round(dailyProtein),
+
+      totalCalories: Math.round(totalCalories),
+      totalFats: Math.round(totalFats),
+      totalProtein: Math.round(totalProtein),
+      totalCarbs: Math.round(totalCarbs),
+
+      consumedTotals: roundAll(consumedTotals),
+      netTotals: roundAll(netTotals),
+      remainingTotals: roundAll(remainingTotals),
+      progressPercent,
     };
   }, [profile, derived, mealLog, workouts]);
 
@@ -299,7 +479,7 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
     consumedTotals = { calories: 0, protein: 0, fats: 0, carbs: 0 },
     netTotals = { calories: 0, protein: 0, fats: 0, carbs: 0 },
     remainingTotals = { calories: 0, protein: 0, fats: 0, carbs: 0 },
-    progressPercent = 0
+    progressPercent = 0,
   } = nutritionTotals;
 
   // -------------------- Format Date Helper (Memoized) --------------------
@@ -326,11 +506,14 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
 
     const startDate = new Date(mealLog[0].meal_date);
     const endDate = new Date(mealLog[mealLog.length - 1].meal_date);
-    
+
     // Limit chart data to last 30 days for better performance
     const maxDays = 30;
     const daysDiff = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
-    const actualEndDate = daysDiff > maxDays ? new Date(startDate.getTime() + maxDays * 24 * 60 * 60 * 1000) : endDate;
+    const actualEndDate =
+      daysDiff > maxDays
+        ? new Date(startDate.getTime() + maxDays * 24 * 60 * 60 * 1000)
+        : endDate;
 
     const days = [];
     for (
@@ -340,16 +523,19 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
     ) {
       const dateStr = formatDate(new Date(d));
       const mealsOfDay = mealsByDate[dateStr] || [];
-      
+
       // Pre-calculate totals to avoid multiple reduce calls
-      let calories = 0, protein = 0, fats = 0, carbs = 0;
+      let calories = 0,
+        protein = 0,
+        fats = 0,
+        carbs = 0;
       for (const meal of mealsOfDay) {
         calories += meal.calories || 0;
         protein += meal.protein || 0;
         fats += meal.fat || 0;
         carbs += meal.carbs || 0;
       }
-      
+
       days.push({
         date: dateStr,
         calories,
@@ -363,95 +549,133 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
 
   // -------------------- Suggested Dishes (Ultra-Optimized) --------------------
   const suggestedDishes = useMemo(() => {
-    if (!profile || !dishes?.length) return [];
+    if (!profile || !dishes?.length || !allergenOptions?.length) return [];
 
-    // Early return if no restrictions
-    const hasAllergens = profile.allergens?.length > 0;
-    const hasGoal = profile.goal;
-    const hasEatingStyle = profile.eating_style;
+    return dishes.map((dish) => {
+      let recommended = true;
 
-    if (!hasAllergens && !hasGoal && !hasEatingStyle) {
-      return dishes; // Return all dishes if no filters
-    }
+      // --- Allergens ---
+      if (userAllergenIds.length && dish.ingredients_dish_id_fkey?.length) {
+        const ingredientAllergenIds = dish.ingredients_dish_id_fkey
+          .map((ing) => ing.allergen)
+          .filter(Boolean);
 
-    // Pre-compute user preferences once
-    const userAllergens = hasAllergens ? (profile.allergens || []).map(a => a.toLowerCase().trim()) : [];
-    const userGoal = hasGoal ? profile.goal.toLowerCase().trim() : '';
-    const userEatingStyle = hasEatingStyle ? profile.eating_style.toLowerCase().trim() : '';
-
-    return dishes.filter((dish) => {
-      // Quick early returns for better performance
-      if (hasAllergens) {
-        const dishName = (dish.name || "").toLowerCase();
-        const dishDescription = (dish.description || "").toLowerCase();
-        const hasAllergen = userAllergens.some(allergen => 
-          dishName.includes(allergen) || dishDescription.includes(allergen)
-        );
-        if (hasAllergen) return false;
+        if (userAllergenIds.some((id) => ingredientAllergenIds.includes(id))) {
+          recommended = false;
+        }
       }
 
-      if (hasGoal && dish.goal && !dish.goal.toLowerCase().includes(userGoal)) {
-        return false;
+      // --- Health conditions ---
+      const userHealthConditions = Array.isArray(profile.health_conditions)
+        ? profile.health_conditions
+            .map((h) => h.toLowerCase().trim())
+            .filter(Boolean)
+        : profile.health_conditions
+        ? [profile.health_conditions.toLowerCase().trim()]
+        : [];
+
+      if (userHealthConditions.length && dish.health_condition) {
+        const dishConditions = Array.isArray(dish.health_condition)
+          ? dish.health_condition
+              .map((c) => c?.toLowerCase().trim())
+              .filter(Boolean)
+          : dish.health_condition?.toLowerCase().trim()
+          ? [dish.health_condition.toLowerCase().trim()]
+          : [];
+
+        if (dishConditions.some((c) => userHealthConditions.includes(c))) {
+          recommended = false;
+        }
       }
 
-      if (hasEatingStyle && dish.eating_style && !dish.eating_style.toLowerCase().includes(userEatingStyle)) {
-        return false;
+      // --- Goal ---
+      const userGoal = profile.goal?.toLowerCase().trim() || "";
+      if (userGoal && dish.goal) {
+        const dishGoals = Array.isArray(dish.goal)
+          ? dish.goal.map((g) => g.toLowerCase().trim()).filter(Boolean)
+          : [dish.goal.toLowerCase().trim()];
+
+        if (!dishGoals.some((g) => g.includes(userGoal))) recommended = false;
       }
 
-      return true;
+      // --- Eating style ---
+      const userEatingStyle = profile.eating_style?.toLowerCase().trim() || "";
+      if (userEatingStyle && dish.eating_style) {
+        const dishStyles = Array.isArray(dish.eating_style)
+          ? dish.eating_style.map((s) => s.toLowerCase().trim()).filter(Boolean)
+          : [dish.eating_style.toLowerCase().trim()];
+
+        if (!dishStyles.some((s) => s.includes(userEatingStyle)))
+          recommended = false;
+      }
+
+      return { ...dish, recommended };
     });
-  }, [profile, dishes]);
+  }, [profile, dishes, allergenOptions]);
 
-  // Filter by search query (ultra-optimized)
+  // 2️⃣ Apply search filter
   const filteredDishes = useMemo(() => {
-    if (!searchTerm.trim()) return suggestedDishes;
-    
+    if (!searchTerm?.trim()) return suggestedDishes;
+
     const query = searchTerm.toLowerCase().trim();
-    const queryLength = query.length;
-    
-    // Early return for very short queries
-    if (queryLength < 2) return suggestedDishes;
-    
+    if (query.length < 2) return suggestedDishes;
+
     return suggestedDishes.filter((dish) => {
       const dishName = dish.name?.toLowerCase() || "";
       const dishDescription = dish.description?.toLowerCase() || "";
-      
-      // Quick string matching with early returns
       return dishName.includes(query) || dishDescription.includes(query);
     });
   }, [suggestedDishes, searchTerm]);
 
-  const handleAddMeal = useCallback(async (dish, mealType, multiplier, servingSize) => {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
+  const handleAddMeal = useCallback(
+    async (dish, mealType, multiplier, servingSize) => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setSuccessText("You must be logged in to add a meal.");
+        setShowSuccessModal(true);
+        return;
+      }
 
-    const today = formatDate(new Date());
+      // 🧠 Check if dish.id exists before proceeding
+      if (!dish?.id) {
+        console.error("Dish ID is missing:", dish);
+        setSuccessText("Cannot add meal: Missing dish ID.");
+        setShowSuccessModal(true);
+        return;
+      }
 
-    const newEntry = {
-      user_id: user.id,
-      dish_id: dish.id,
-      dish_name: dish.name,
-      meal_date: today,
-      meal_type: mealType,
-      serving_label: `${servingSize}g`,
-      calories: Math.round(dish.calories_value * multiplier),
-      protein: Math.round(dish.protein_value * multiplier),
-      fat: Math.round(dish.fat_value * multiplier),
-      carbs: Math.round(dish.carbs_value * multiplier),
-    };
+      const today = new Date().toISOString().split("T")[0]; // standardized date format
 
-    const { error } = await supabase.from("meal_logs").insert([newEntry]);
-    if (error) {
-      console.error("Error adding meal:", error.message);
-      setSuccessText("Failed to add meal. Please try again.");
-    } else {
-      setMealLog(prev => [...prev, newEntry]);
-      setSuccessText(`${dish.name} added as ${mealType}!`);
-    }
-    setShowSuccessModal(true);
-  }, []);
+      const newEntry = {
+        user_id: user.id,
+        dish_id: dish.id,
+        dish_name: dish.name,
+        meal_date: today,
+        meal_type: mealType,
+        serving_label: `${servingSize}g`,
+        calories: Math.round(dish.calories_value * multiplier),
+        protein: Math.round(dish.protein_value * multiplier),
+        fat: Math.round(dish.fat_value * multiplier),
+        carbs: Math.round(dish.carbs_value * multiplier),
+      };
+
+      const { error } = await supabase.from("meal_logs").insert([newEntry]);
+
+      if (error) {
+        console.error("Error adding meal:", error.message);
+        setSuccessText("Failed to add meal. Please try again.");
+      } else {
+        setMealLog((prev) => [...prev, newEntry]);
+        setSuccessText(`${dish.name} added as ${mealType}!`);
+      }
+
+      setShowSuccessModal(true);
+    },
+    []
+  );
+
 
   // Early return after all hooks
   if (isLoading || !profile)
@@ -459,15 +683,61 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-green-200 via-white to-green-200">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600 mx-auto mb-4"></div>
-          <p className="text-lg text-green-700 font-medium">Loading SmartGenie...</p>
+          <p className="text-lg text-green-700 font-medium">
+            Loading SmartGenie...
+          </p>
         </div>
       </div>
     );
 
+  const handleEatDish = async (dish) => {
+    try {
+      const {
+        data: { user },
+        error: userErr,
+      } = await supabase.auth.getUser();
+
+      if (userErr || !user) {
+        alert("Please log in to save this meal.");
+        navigate("/login");
+        return;
+      }
+
+      // Log meal to Supabase
+      const { error } = await supabase.from("meal_logs").insert([
+      {
+        user_id: user.id,
+        dish_id: dish.id,  // Add this
+        dish_name: dish.name,
+        meal_type: dish.meal_type || "Lunch",
+        calories: dish.calories || 0,
+        protein: dish.protein || 0,
+        fat: dish.fat || 0,
+        carbs: dish.carbs || 0,
+        serving_label: dish.serving_label || "1 serving",
+        meal_date: new Date().toISOString().split("T")[0],
+      },
+    ]);
+
+      if (error) {
+        console.error("Error saving meal:", error);
+        alert("Failed to log your meal.");
+      } else {
+        alert(`✅ ${dish.name} added to your Meal Log!`);
+        // Optional: Navigate automatically to journal page
+        // navigate("/journal");
+      }
+    } catch (err) {
+      console.error("Unexpected error:", err);
+    }
+  };
+
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-green-200 via-white to-green-200 flex items-center justify-center px-4 py-6 font-sans">
-      <div className="bg-white w-[375px] h-[700px] rounded-3xl shadow-2xl overflow-hidden flex flex-col border border-green-200">
-        {/* Header */}
+    // <div className="min-h-screen bg-green-50 flex items-center justify-center px-4 py-6 ">
+    //   <div className="bg-white w-[375px] h-[700px] rounded-2xl shadow-2xl flex flex-col overflow-hidden relative">
+    <div className="min-h-screen bg-green-50 flex items-center justify-center px-4 py-6 ">
+      <div className="bg-white w-[375px] h-[700px] rounded-2xl shadow-2xl flex flex-col overflow-hidden relative pb-[20px]">
         <div className="bg-gradient-to-r from-green-500 to-green-400 w-full h-[170px] rounded-t-3xl flex flex-col px-5 pt-10 relative">
           <div className="flex justify-between items-center mb-4">
             <h1 className="text-2xl font-extrabold text-white tracking-wide">
@@ -485,11 +755,11 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
           </div>
 
           {/* Tabs */}
-          <div className="flex space-x-3">
+          <div className="flex justify-center space-x-3 mt-2">
             {[
               { label: "Nutrition Protocol", viewName: "nutrition-protocol" },
+              { label: "Dishes", viewName: "suggested-dish" },
               { label: "My Status", viewName: "my-status" },
-              { label: "Suggested Dish", viewName: "suggested-dish" },
             ].map((tab) => (
               <button
                 key={tab.viewName}
@@ -528,7 +798,7 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
                       fontFamily: "sans-serif",
                     }}
                   >
-                    {dailyCalories} kcal/day
+                    {derived.calories} kcal/day
                   </p>
                 </div>
 
@@ -724,34 +994,9 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
                   );
                 })}
               </div>
-
-              <div className="w-full h-64 mt-4">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart
-                    data={chartData}
-                    margin={{ top: 20, right: 20, left: 0, bottom: 5 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                    <XAxis dataKey="date" stroke="#374151" />
-                    <YAxis stroke="#374151" />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "#FFFFFF",
-                        borderRadius: "8px",
-                      }}
-                    />
-                    <Legend wrapperStyle={{ color: "#374151" }} />
-                    <Bar dataKey="calories" fill="#EF4444" name="Calories" />
-                    <Bar dataKey="protein" fill="#3B82F6" name="Protein" />
-                    <Bar dataKey="fats" fill="#FACC15" name="Fats" />
-                    <Bar dataKey="carbs" fill="#22C55E" name="Carbs" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
             </div>
           )}
 
-          {/* Suggested Dish */}
           {/* Suggested Dish */}
           {view === "suggested-dish" && (
             <div className="space-y-6">
@@ -759,7 +1004,7 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
               <div className="flex items-center justify-center gap-2">
                 <FaUtensils className="text-green-600 text-xl" />
                 <h2 className="text-lg font-bold text-green-700">
-                  Suggested Dishes
+                  Suggested Dishes for You
                 </h2>
               </div>
 
@@ -781,151 +1026,231 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
               </div>
 
               {/* Suggested Dish List */}
-              {(() => {
-                if (filteredDishes.length === 0)
-                  return (
-                    <p className="text-gray-500 italic text-center">
-                      No dishes found.
-                    </p>
-                  );
-
-                return filteredDishes.map((dish) => (
-                  <div
-                    key={dish.id}
-                    className="bg-white rounded-2xl border border-green-100 shadow-md p-4 flex gap-4 items-center hover:shadow-lg transition-all duration-300"
-                  >
-                    {/* Dish Image */}
-                    <div className="w-24 h-24 bg-gray-100 flex items-center justify-center overflow-hidden rounded-xl">
-                      {dish.image_url ? (
-                        <img
-                          src={dish.image_url}
-                          alt={dish.name}
-                          className="object-cover w-full h-full"
-                        />
-                      ) : (
-                        <span className="text-gray-400 text-xs">No Image</span>
-                      )}
-                    </div>
-
-                    {/* Dish Info */}
-                    <div className="flex-1 flex flex-col justify-between h-full">
-                      <div>
-                        <h3 className="font-semibold text-md text-gray-800">
-                          {dish.name}
-                        </h3>
-                        <p className="text-sm text-gray-500 mt-1">
-                          {dish.calories_value} kcal | {dish.protein_value}g
-                          protein | {dish.fat_value}g fat | {dish.carbs_value}g
-                          carbs
-                        </p>
-                      </div>
-
-                      {/* Eat Button */}
-                      <button
-                        onClick={() => {
-                          setSelectedDish(dish);
-                          setShowMealModal(true);
-                        }}
-                        className="bg-green-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-green-700 transition self-start flex items-center gap-2 mt-2"
+              <div className="space-y-6">
+                {filteredDishes.length === 0 ? (
+                  <p className="text-gray-500 italic text-center">
+                    No dishes found.
+                  </p>
+                ) : (
+                  // Sort recommended dishes first
+                  [...filteredDishes]
+                    .sort((a, b) => (b.recommended ? 1 : 0) - (a.recommended ? 1 : 0))
+                    .map((dish) => (
+                      <div
+                        key={dish.id}
+                        className={`bg-white rounded-2xl border shadow-md p-4 flex gap-4 items-center hover:shadow-lg transition-all duration-300 ${
+                          dish.recommended ? "border-green-100" : "border-red-300"
+                        }`}
                       >
-                        <FaUtensils className="text-white" /> Eat
-                      </button>
-                    </div>
-                  </div>
-                ));
-              })()}
+                        {/* Dish Image */}
+                        <div className="w-24 h-24 bg-gray-100 flex items-center justify-center overflow-hidden rounded-xl">
+                          {dish.image_url ? (
+                            <img
+                              src={dish.image_url}
+                              alt={dish.name}
+                              className="object-cover w-full h-full"
+                            />
+                          ) : (
+                            <span className="text-gray-400 text-xs">No Image</span>
+                          )}
+                        </div>
+
+                        {/* Dish Info */}
+                        <div className="flex-1 flex flex-col justify-between h-full">
+                          <div>
+                            <h3 className="font-semibold text-md text-gray-800">
+                              {dish.name}
+                            </h3>
+                            <p className="text-sm text-gray-500 mt-1 flex items-center">
+                              <BsCircleFill className="mr-1 text-yellow-400" size={10} />
+                              {dish.eating_style}
+                            </p>
+                            {!dish.recommended && (
+                              <p className="text-red-500 text-sm mt-1">Not recommended</p>
+                            )}
+
+                            {dish.positiveMatch && (
+                              <p className="text-green-600 text-xs mt-1">
+                                Suitable for your condition
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Eat Button */}
+                          <button
+                            onClick={() => handleEatDish(dish)}
+                            className="bg-green-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-green-700 transition self-start flex items-center gap-2 mt-2"
+                          >
+                            <FaUtensils className="text-white" /> Eat
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
             </div>
           )}
+
         </div>
+        {/* Meal Modal */}
         {showMealModal && selectedDish && (
-          <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-            <div className="bg-white rounded-2xl shadow-lg p-6 w-80">
-              <h3 className="text-lg font-bold text-green-700 mb-4">
-                Add {selectedDish.name}
-              </h3>
-
-              {/* Meal Type */}
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Meal Type
-              </label>
-              <select
-                value={mealType}
-                onChange={(e) => setMealType(e.target.value)}
-                className="w-full border border-green-300 rounded-lg p-2 mb-3 focus:ring-2 focus:ring-green-400"
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl p-6 w-full max-w-3xl overflow-auto max-h-[90vh] relative shadow-lg">
+              <button
+                className="absolute top-4 right-4 text-gray-600 hover:text-gray-900 text-xl"
+                onClick={() => {
+                  setSelectedDish(null);
+                  setShowMealModal(false);
+                }}
               >
-                <option value="">Select...</option>
-                <option value="Breakfast">Breakfast</option>
-                <option value="Lunch">Lunch</option>
-                <option value="Dinner">Dinner</option>
-                <option value="Snack">Snack</option>
-              </select>
+                ✕
+              </button>
 
-              {/* Serving Size Dropdown */}
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Serving Size
-              </label>
-              <select
-                value={servingSize || ""}
-                onChange={(e) => setServingSize(parseInt(e.target.value))}
-                className="w-full border border-green-300 rounded-lg p-2 mb-4 focus:ring-2 focus:ring-green-400"
-              >
-                <option value="">Select grams...</option>
-                <option value={100}>100g</option>
-                <option value={152}>152g</option>
-                <option value={245}>245g</option>
-              </select>
+              <h2 className="text-2xl font-bold mb-4">{selectedDish.name}</h2>
 
-              {/* Buttons */}
-              <div className="flex justify-end gap-2">
+              {/* 🔽 Meal Type & Serving Size */}
+              <div className="flex flex-col sm:flex-row gap-4 mb-6">
+                <div className="flex-1">
+                  <label className="block font-medium text-gray-700 mb-1">
+                    Meal Type
+                  </label>
+                  <select
+                    value={selectedMealType}
+                    onChange={(e) => setSelectedMealType(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  >
+                    <option value="">Select Meal Type</option>
+                    <option value="Breakfast">Breakfast</option>
+                    <option value="Lunch">Lunch</option>
+                    <option value="Dinner">Dinner</option>
+                    <option value="Snack">Snack</option>
+                  </select>
+                </div>
+
+                <div className="flex-1">
+                  <label className="block font-medium text-gray-700 mb-1">
+                    Serving Size
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={servingSize}
+                    onChange={(e) => setServingSize(e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                    placeholder="Enter servings (e.g. 1)"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-6 mb-6">
+                <div className="flex-1">
+                  <p className="text-gray-600 mb-2">
+                    <span className="font-medium">Meal Type:</span>{" "}
+                    {selectedDish.meal_type || "N/A"}
+                  </p>
+                  <p className="text-gray-600 mb-2">
+                    <span className="font-medium">Goal:</span>{" "}
+                    {selectedDish.goal || "—"}
+                  </p>
+                  <p className="text-gray-600 mb-2">
+                    <span className="font-medium">Dietary Style:</span>{" "}
+                    {selectedDish.eating_style || "—"}
+                  </p>
+                </div>
+
+                <div className="flex-1">
+                  {selectedDish.description && (
+                    <div>
+                      <h3 className="text-lg font-semibold mb-2">
+                        Description
+                      </h3>
+                      <p className="text-gray-600">
+                        {selectedDish.description}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 🍽 Ingredients Table */}
+              {selectedDish.ingredients_dish_id_fkey?.length > 0 && (
+                <div className="bg-gray-50 rounded-lg overflow-hidden mb-6">
+                  <table className="w-full border-collapse">
+                    <thead>
+                      <tr className="bg-gray-100">
+                        <th className="text-left p-3">Ingredient</th>
+                        <th className="text-right p-3">Amount</th>
+                        <th className="text-right p-3">Calories</th>
+                        <th className="text-right p-3">Protein</th>
+                        <th className="text-right p-3">Carbs</th>
+                        <th className="text-right p-3">Fats</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedDish.ingredients_dish_id_fkey.map((ing) => (
+                        <tr key={ing.id} className="border-t border-gray-200">
+                          <td className="p-3">{ing.name}</td>
+                          <td className="text-right p-3">
+                            {ing.amount} {ing.unit || "g"}
+                          </td>
+                          <td className="text-right p-3">
+                            {Math.round(ing.calories || 0)}
+                          </td>
+                          <td className="text-right p-3">
+                            {Math.round(ing.protein || 0)}g
+                          </td>
+                          <td className="text-right p-3">
+                            {Math.round(ing.carbs || 0)}g
+                          </td>
+                          <td className="text-right p-3">
+                            {Math.round(ing.fats || 0)}g
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* 🧑‍🍳 Preparation Steps */}
+              {selectedDish.steps?.length > 0 && (
+                <div className="mb-6">
+                  <h3 className="text-lg font-semibold mb-3">
+                    Preparation Steps
+                  </h3>
+                  <ol className="list-decimal ml-6 space-y-2">
+                    {selectedDish.steps.map((step, idx) => (
+                      <li key={idx} className="text-gray-700">
+                        {step}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
+              <div className="mt-6 flex justify-end gap-3">
                 <button
-                  onClick={() => setShowMealModal(false)}
-                  className="px-3 py-2 rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={async () => {
-                    if (!mealType || !servingSize) {
-                      setAlertMessage(
-                        "Please select a meal type and serving size."
-                      );
-                      setShowAlertModal(true);
-                      return;
-                    }
-
-                    // Calculate multiplier based on dish's standard serving
-                    const multiplier =
-                      servingSize / (selectedDish.standard_serving || 100);
-
-                    await handleAddMeal(
-                      selectedDish,
-                      mealType,
-                      multiplier,
-                      servingSize
-                    );
-
+                  onClick={() => {
+                    console.log("Add meal:", {
+                      name: selectedDish.name,
+                      mealType: selectedMealType,
+                      servings: servingSize,
+                    });
                     setShowMealModal(false);
                   }}
-                  className="px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition"
+                  className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
                 >
-                  Add Meal
+                  Add to Meal Log
                 </button>
-                {showAlertModal && (
-                  <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-xl shadow-lg p-6 w-80 text-center">
-                      <h2 className="text-lg font-semibold mb-4 text-gray-800">
-                        Notice
-                      </h2>
-                      <p className="text-gray-600 mb-6">{alertMessage}</p>
-                      <button
-                        onClick={() => setShowAlertModal(false)}
-                        className="px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition"
-                      >
-                        OK
-                      </button>
-                    </div>
-                  </div>
-                )}
+                <button
+                  onClick={() => {
+                    setSelectedDish(null);
+                    setShowMealModal(false);
+                  }}
+                  className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Close
+                </button>
               </div>
             </div>
           </div>
@@ -961,6 +1286,46 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
             </div>
           </div>
         )}
+        {showDishPrompt && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] px-4">
+            <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl p-6 text-center relative">
+              <button
+                className="absolute top-3 right-3 text-gray-500 hover:text-gray-700"
+                onClick={() => setShowDishPrompt(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+              <div className="mx-auto mb-3 w-12 h-12 rounded-full bg-green-100 flex items-center justify-center">
+                <FaUtensils className="text-green-600" />
+              </div>
+              <h3 className="text-lg font-extrabold text-green-700 mb-2">
+                Hungry for ideas?
+              </h3>
+              <p className="text-sm text-gray-600 mb-5">
+                Discover dishes picked for your goals and eating style. Tap to find
+                your perfect bite.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  className="flex-1 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition"
+                  onClick={() => {
+                    setView("suggested-dish");
+                    setShowDishPrompt(false);
+                  }}
+                >
+                  Show me dishes
+                </button>
+                <button
+                  className="flex-1 bg-gray-100 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-200 transition"
+                  onClick={() => setShowDishPrompt(false)}
+                >
+                  Maybe later
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         <FooterNav />;
       </div>
     </div>
@@ -968,4 +1333,3 @@ const PersonalDashboard = React.memo(function PersonalDashboard() {
 });
 
 export default PersonalDashboard;
-

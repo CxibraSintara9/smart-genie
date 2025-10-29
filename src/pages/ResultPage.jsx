@@ -1,491 +1,3 @@
-// import React, { useEffect, useState } from "react";
-// import { useLocation, useNavigate } from "react-router-dom";
-// import { supabase } from "../supabaseClient";
-// import { FiPlus, FiMessageCircle } from "react-icons/fi";
-// import { motion, AnimatePresence } from "framer-motion";
-// import FooterNav from "../components/FooterNav";
-
-// export default function ResultPage() {
-//   const location = useLocation();
-//   const navigate = useNavigate();
-//   const dishId = location.state?.dishId;
-//   const fallbackImage = location.state?.imageSrc;
-//   const accuracy = location.state?.accuracy;
-//   const isLoggedIn = location.state?.isLoggedIn || false;
-
-//   const [dish, setDish] = useState(null);
-//   const [loading, setLoading] = useState(true);
-//   const [error, setError] = useState(null);
-//   const [showIngredients, setShowIngredients] = useState(false);
-//   const [showStores, setShowStores] = useState(false);
-//   const [selectedServing, setSelectedServing] = useState("Per 100g");
-
-//   // Feedback state
-//   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
-//   const [feedbackText, setFeedbackText] = useState("");
-
-//   // Add Meal Modal state
-//   const [showAddMealModal, setShowAddMealModal] = useState(false);
-//   const [mealType, setMealType] = useState("Breakfast");
-
-//   const servingOptions = [
-//     { label: "Per 100g", multiplier: 1 },
-//     { label: "Per cup(245g)", multiplier: 2.44 },
-//     { label: "Per Serving(152g)", multiplier: 1.52 },
-//   ];
-
-//   const mealTypes = ["Breakfast", "Lunch", "Dinner", "Snack"];
-
-//   const getNutritionValue = (baseValue) => {
-//     const multiplier =
-//       servingOptions.find((s) => s.label === selectedServing)?.multiplier || 1;
-//     return (baseValue * multiplier).toFixed(1);
-//   };
-
-//   const getUnitFromLabel = (labelValue) =>
-//     labelValue ? labelValue.replace(/[0-9~ ]+/g, "").trim() : "";
-
-//   useEffect(() => {
-//     if (!dishId) {
-//       navigate("/", { replace: true });
-//       return;
-//     }
-
-//     const fetchDish = async () => {
-//       setLoading(true);
-//       setError(null);
-
-//       const { data, error } = await supabase
-//         .from("dishinfo")
-//         .select(
-//           `
-//           id,
-//           name,
-//           image_url,
-//           calories_label,
-//           calories_value,
-//           protein_label,
-//           protein_value,
-//           fat_label,
-//           fat_value,
-//           carbs_label,
-//           carbs_value,
-//           ingredient,
-//           store,
-//           dietary,
-//           allergen,
-//           goal,
-//           description
-//         `
-//         )
-//         .eq("id", dishId)
-//         .single();
-
-//       if (error) {
-//         setError("Failed to load dish info: " + error.message);
-//         setLoading(false);
-//         return;
-//       }
-
-//       if (data) {
-//         setDish({
-//           id: data.id,
-//           name: data.name,
-//           image: fallbackImage || data.image_url,
-//           calories: data.calories_value || 0,
-//           protein: data.protein_value || 0,
-//           fat: data.fat_value || 0,
-//           carbs: data.carbs_value || 0,
-//           caloriesLabel: data.calories_label,
-//           proteinLabel: data.protein_label,
-//           fatLabel: data.fat_label,
-//           carbsLabel: data.carbs_label,
-//           ingredients: Array.isArray(data.ingredient) ? data.ingredient : [],
-//           stores: Array.isArray(data.store) ? data.store : [],
-//           dietary: Array.isArray(data.dietary) ? data.dietary : [],
-//           allergen: Array.isArray(data.allergen) ? data.allergen : [],
-//           goal: Array.isArray(data.goal) ? data.goal : [],
-//           description: data.description || "",
-//         });
-//       }
-
-//       setLoading(false);
-//     };
-
-//     fetchDish();
-//   }, [dishId, fallbackImage, navigate]);
-
-//   // Feedback submission
-//   const handleSubmitFeedback = async () => {
-//     if (!isLoggedIn) {
-//       alert("You must log in first to submit feedback.");
-//       navigate("/login");
-//       return;
-//     }
-//     if (!feedbackText.trim()) {
-//       alert("Please enter your feedback before submitting.");
-//       return;
-//     }
-
-//     const { data: userData } = await supabase.auth.getUser();
-//     if (!userData.user) return;
-
-//     const { error } = await supabase.from("feedback_submissions").insert([
-//       {
-//         user_id: userData.user.id,
-//         dish_id: dish.id,
-//         feedback_text: feedbackText.trim(),
-//       },
-//     ]);
-
-//     if (error) {
-//       console.error("Error submitting feedback:", error.message);
-//       alert("Failed to submit feedback. Try again later.");
-//     } else {
-//       alert("Thank you for your feedback!");
-//       setFeedbackText("");
-//       setShowFeedbackModal(false);
-//     }
-//   };
-
-//   // Add meal submission
-//   const handleAddMeal = async () => {
-//     if (!isLoggedIn) {
-//       alert("You must log in first to add a meal.");
-//       navigate("/login");
-//       return;
-//     }
-
-//     const { data: userData } = await supabase.auth.getUser();
-//     if (!userData.user) return;
-
-//     const { error } = await supabase.from("meal_logs").insert([
-//       {
-//         user_id: userData.user.id,
-//         dish_id: dish.id,
-//         dish_name: dish.name,
-//         meal_type: mealType,
-//         serving_label: selectedServing,
-//         calories: getNutritionValue(dish.calories),
-//         protein: getNutritionValue(dish.protein),
-//         fat: getNutritionValue(dish.fat),
-//         carbs: getNutritionValue(dish.carbs),
-//       },
-//     ]);
-
-//     if (error) {
-//       console.error("Error adding meal:", error.message);
-//       alert("Failed to add meal. Try again later.");
-//     } else {
-//       alert("Meal added to your journal!");
-//       setShowAddMealModal(false);
-//     }
-//   };
-
-//   if (!dishId) return null;
-//   if (loading)
-//     return (
-//       <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
-//         <p>Loading dish details...</p>
-//       </div>
-//     );
-//   if (error)
-//     return (
-//       <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
-//         <p className="text-red-600">{error}</p>
-//       </div>
-//     );
-//   if (!dish)
-//     return (
-//       <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
-//         <p>Dish not found.</p>
-//       </div>
-//     );
-
-//   return (
-//     <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
-//       <div className="bg-white w-[375px] h-[667px] rounded-xl shadow-xl flex flex-col overflow-hidden relative">
-//         {/* Dish Image */}
-//         <motion.img
-//           initial={{ opacity: 0 }}
-//           animate={{ opacity: 1 }}
-//           src={dish.image}
-//           alt={dish.name}
-//           className="w-full h-[200px] object-cover rounded-t-xl"
-//         />
-
-//         {/* Scrollable Content */}
-//         <div className="flex-1 overflow-y-auto px-4 py-3">
-//           <h1 className="text-2xl font-bold mt-2 text-gray-800">{dish.name}</h1>
-
-//           {accuracy && (
-//             <p className="text-sm text-gray-600 mt-1 mb-2">
-//               Match confidence: <span className="font-medium">{accuracy}%</span>
-//             </p>
-//           )}
-//           {accuracy && accuracy < 100 && (
-//             <p className="text-xs text-yellow-800 bg-yellow-100 rounded-lg px-3 py-2 mb-3">
-//               Couldn’t perfectly recognize your dish — here’s the closest
-//               match.Feel free to add your feedback
-//             </p>
-//           )}
-
-//           <p className="text-xs text-gray-600 mb-5">{dish.description}</p>
-
-//           {/* Nutrition Facts */}
-//           <div className="border border-gray-200 rounded-xl shadow-inner overflow-hidden mb-5">
-//             <div className="p-4">
-//               <p className="font-medium text-center mb-4">Nutrition Facts</p>
-
-//               <div className="mb-4 flex items-center gap-2">
-//                 <label className="text-sm font-medium text-gray-700">
-//                   Serving Size:
-//                 </label>
-//                 <select
-//                   value={selectedServing}
-//                   onChange={(e) => setSelectedServing(e.target.value)}
-//                   className="border rounded-md px-2 py-1 text-sm"
-//                 >
-//                   {servingOptions.map((option) => (
-//                     <option key={option.label} value={option.label}>
-//                       {option.label}
-//                     </option>
-//                   ))}
-//                 </select>
-//               </div>
-
-//               {[
-//                 {
-//                   label: "Calories",
-//                   value: dish.calories,
-//                   labelValue: dish.caloriesLabel,
-//                   color: "bg-red-500",
-//                 },
-//                 {
-//                   label: "Protein",
-//                   value: dish.protein,
-//                   labelValue: dish.proteinLabel,
-//                   color: "bg-blue-500",
-//                 },
-//                 {
-//                   label: "Fat",
-//                   value: dish.fat,
-//                   labelValue: dish.fatLabel,
-//                   color: "bg-yellow-500",
-//                 },
-//                 {
-//                   label: "Carbs",
-//                   value: dish.carbs,
-//                   labelValue: dish.carbsLabel,
-//                   color: "bg-green-500",
-//                 },
-//               ].map(({ label, value, labelValue, color }) => (
-//                 <React.Fragment key={label}>
-//                   <div className="flex justify-between mb-2 items-center">
-//                     <div className="flex items-center gap-2">
-//                       <span
-//                         className={`w-3 h-3 rounded-full inline-block ${color}`}
-//                       ></span>
-//                       <p>{label}</p>
-//                     </div>
-//                     <p className="font-medium">
-//                       ~{getNutritionValue(value)} {getUnitFromLabel(labelValue)}
-//                     </p>
-//                   </div>
-//                   <hr className="border-gray-200" />
-//                 </React.Fragment>
-//               ))}
-//             </div>
-//             <div className="bg-indigo-50 text-indigo-800 text-xs px-3 py-2">
-//               Tip: Balanced nutrition keeps you energized!
-//             </div>
-//           </div>
-
-//           {/* Ingredients */}
-//           <div className="mb-4">
-//             <button
-//               onClick={() => setShowIngredients(!showIngredients)}
-//               className="text-indigo-600 underline font-medium"
-//             >
-//               {showIngredients ? "Hide Ingredients" : "View Ingredients"}
-//             </button>
-//           </div>
-
-//           {/* Stores */}
-//           <div className="mb-4">
-//             <button
-//               onClick={() => setShowStores(!showStores)}
-//               className="text-indigo-600 underline font-medium"
-//             >
-//               {showStores
-//                 ? "Hide Recommended Stores"
-//                 : "View Recommended Stores"}
-//             </button>
-//           </div>
-
-//           {/* Dietary, Allergen, Goal */}
-//           <div className="mb-4">
-//             {dish.dietary.length > 0 && (
-//               <p className="text-xs text-green-700 mb-1">
-//                 Dietary: {dish.dietary.join(", ")}
-//               </p>
-//             )}
-//             {dish.allergen.length > 0 && (
-//               <p className="text-xs text-red-700 mb-1">
-//                 Allergens: {dish.allergen.join(", ")}
-//               </p>
-//             )}
-//             {dish.goal.length > 0 && (
-//               <p className="text-xs text-blue-700 mb-1">
-//                 Goal: {dish.goal.join(", ")}
-//               </p>
-//             )}
-//           </div>
-
-//           {/* Conditional Buttons */}
-//           {isLoggedIn ? (
-//             <>
-//               <button
-//                 onClick={() => setShowAddMealModal(true)}
-//                 className="w-full border border-green-600 text-green-700 font-semibold py-3 rounded-xl shadow-md hover:bg-green-50 transition mb-3"
-//               >
-//                 Add Meal
-//               </button>
-//               <FooterNav />
-//             </>
-//           ) : (
-//             <button
-//               onClick={() => navigate("/login")}
-//               className="w-full border border-indigo-600 text-indigo-700 font-semibold py-3 rounded-xl shadow-md hover:bg-indigo-50 transition mb-3"
-//             >
-//               Continue
-//             </button>
-//           )}
-//         </div>
-
-//         {/* Feedback Button */}
-//         <button
-//           onClick={() => setShowFeedbackModal(true)}
-//           className="absolute bottom-20 right-5 bg-indigo-600 text-white rounded-full p-3 shadow-lg hover:bg-indigo-700 transition"
-//         >
-//           <FiMessageCircle size={22} />
-//         </button>
-
-//         {/* Feedback Modal */}
-//         <AnimatePresence>
-//           {showFeedbackModal && (
-//             <motion.div
-//               className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
-//               initial={{ opacity: 0 }}
-//               animate={{ opacity: 1 }}
-//               exit={{ opacity: 0 }}
-//             >
-//               <motion.div
-//                 className="bg-white w-full max-w-md rounded-xl shadow-lg p-5"
-//                 initial={{ scale: 0.8, opacity: 0 }}
-//                 animate={{ scale: 1, opacity: 1 }}
-//                 exit={{ scale: 0.8, opacity: 0 }}
-//               >
-//                 <h2 className="text-lg font-bold mb-3">Give Feedback</h2>
-//                 <textarea
-//                   value={feedbackText}
-//                   onChange={(e) => setFeedbackText(e.target.value)}
-//                   className="w-full border rounded-lg p-2 text-sm mb-3"
-//                   rows={4}
-//                   placeholder="Write your feedback..."
-//                 />
-//                 <div className="flex justify-end gap-2">
-//                   <button
-//                     onClick={() => setShowFeedbackModal(false)}
-//                     className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
-//                   >
-//                     Cancel
-//                   </button>
-//                   <button
-//                     onClick={handleSubmitFeedback}
-//                     className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
-//                   >
-//                     Submit
-//                   </button>
-//                 </div>
-//               </motion.div>
-//             </motion.div>
-//           )}
-//         </AnimatePresence>
-
-//         {/* Add Meal Modal */}
-//         <AnimatePresence>
-//           {showAddMealModal && (
-//             <motion.div
-//               className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
-//               initial={{ opacity: 0 }}
-//               animate={{ opacity: 1 }}
-//               exit={{ opacity: 0 }}
-//             >
-//               <motion.div
-//                 className="bg-white w-full max-w-md rounded-xl shadow-lg p-5"
-//                 initial={{ scale: 0.8, opacity: 0 }}
-//                 animate={{ scale: 1, opacity: 1 }}
-//                 exit={{ scale: 0.8, opacity: 0 }}
-//               >
-//                 <h2 className="text-lg font-bold mb-3">Add Meal to Journal</h2>
-//                 <div className="mb-3">
-//                   <label className="block mb-1 text-sm font-medium">
-//                     Meal Type
-//                   </label>
-//                   <select
-//                     value={mealType}
-//                     onChange={(e) => setMealType(e.target.value)}
-//                     className="w-full border rounded-md p-2 text-sm"
-//                   >
-//                     {mealTypes.map((type) => (
-//                       <option key={type} value={type}>
-//                         {type}
-//                       </option>
-//                     ))}
-//                   </select>
-//                 </div>
-//                 <div className="mb-3">
-//                   <label className="block mb-1 text-sm font-medium">
-//                     Serving Size
-//                   </label>
-//                   <select
-//                     value={selectedServing}
-//                     onChange={(e) => setSelectedServing(e.target.value)}
-//                     className="w-full border rounded-md p-2 text-sm"
-//                   >
-//                     {servingOptions.map((option) => (
-//                       <option key={option.label} value={option.label}>
-//                         {option.label}
-//                       </option>
-//                     ))}
-//                   </select>
-//                 </div>
-//                 <div className="flex justify-end gap-2">
-//                   <button
-//                     onClick={() => setShowAddMealModal(false)}
-//                     className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
-//                   >
-//                     Cancel
-//                   </button>
-//                   <button
-//                     onClick={handleAddMeal}
-//                     className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
-//                   >
-//                     Add
-//                   </button>
-//                 </div>
-//               </motion.div>
-//             </motion.div>
-//           )}
-//         </AnimatePresence>
-//       </div>
-//     </div>
-//   );
-// }
-
-// ==========================================================================================================================
-
 import React, { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "../supabaseClient";
@@ -493,6 +5,7 @@ import { FiMessageCircle } from "react-icons/fi";
 import { motion, AnimatePresence } from "framer-motion";
 import FooterNav from "../components/FooterNav";
 import { CheckCircle, AlertTriangle, Target } from "lucide-react";
+import { getBoholCities, recommendStoresForIngredients } from "../services/storeService";
 
 export default function ResultPage() {
   const location = useLocation();
@@ -509,6 +22,10 @@ export default function ResultPage() {
   const [error, setError] = useState(null);
   const [selectedServing, setSelectedServing] = useState("Per 100g");
   const [showAllMatches, setShowAllMatches] = useState(false);
+  const [selectedCityId, setSelectedCityId] = useState("tagbilaran");
+  const [storeTypeFilters, setStoreTypeFilters] = useState([]);
+  const [boholCities, setBoholCities] = useState([]);
+  const [storeRecommendations, setStoreRecommendations] = useState([]);
 
   // Feedback modal state
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
@@ -592,6 +109,34 @@ export default function ResultPage() {
     fetchDish();
   }, [dishId, fallbackImage, navigate]);
 
+  const ingredientList = dish?.ingredient
+    ? Array.isArray(dish.ingredient)
+      ? dish.ingredient.map((n) => ({ name: n }))
+      : String(dish.ingredient)
+          .split(",")
+          .map((n) => ({ name: n.trim() }))
+    : [];
+
+  useEffect(() => {
+    (async () => {
+      const cities = await getBoholCities();
+      setBoholCities(cities || []);
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      if (!dish) {
+        setStoreRecommendations([]);
+        return;
+      }
+      const recs = await recommendStoresForIngredients(ingredientList, selectedCityId, {
+        onlyTypes: storeTypeFilters,
+      });
+      setStoreRecommendations(recs || []);
+    })();
+  }, [dish, selectedCityId, storeTypeFilters]);
+
   // ---- Feedback ----
   const handleSubmitFeedback = async () => {
     if (!isLoggedIn) {
@@ -646,23 +191,26 @@ export default function ResultPage() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-green-50 via-emerald-50 to-teal-50 p-4">
       <div className="bg-white/90 backdrop-blur-md w-[375px] h-[667px] rounded-3xl shadow-2xl flex flex-col overflow-hidden border border-green-200">
         {/* Dish Image */}
-        <div className="p-4">
-          <motion.img
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            src={dish.image}
-            alt={dish.name}
-            className="w-full h-[200px] object-cover rounded-2xl shadow-lg"
-          />
-          {accuracy && (
-            <span className="absolute bottom-5 right-6 bg-gradient-to-r from-green-500 to-emerald-600 text-white text-xs font-semibold px-3 py-1 rounded-full shadow-lg">
-              {accuracy}% Match
-            </span>
-          )}
+        <div className="p-4 relative">
+          <div className="relative">
+            <motion.img
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              src={dish.image}
+              alt={dish.name}
+              className="w-full h-[200px] object-cover rounded-2xl shadow-lg"
+            />
 
-          {/* Move note outside the image container */}
-          <p className="mt-2 text-xs text-yellow-600 px-2 py-1 rounded">
-            Note: This is a suggested dish and may not be accurately detected.
+            {/* Match percentage inside the image (bottom-right) */}
+            {accuracy && (
+              <span className="absolute bottom-3 right-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white text-xs font-semibold px-3 py-1 rounded-full shadow-lg">
+                {accuracy}% Match
+              </span>
+            )}
+          </div>
+          {/* Note below the image */}
+          <p className="mt-2 text-xs text-yellow-800 bg-yellow-100 border border-yellow-200 px-3 py-2 rounded-lg shadow-sm">
+            ⚠️ Note: This is a suggested dish and may not be accurately detected.
           </p>
         </div>
 
@@ -818,7 +366,6 @@ export default function ResultPage() {
             </div>
           </div>
           {/* Ingredients List */}
-          {/* Ingredients List */}
           {dish.ingredient && dish.ingredient.length > 0 && (
             <div className="mb-4">
               <p className="font-semibold text-gray-800 mb-2">Ingredients:</p>
@@ -831,6 +378,74 @@ export default function ResultPage() {
                       .split(",")
                       .map((item, index) => <li key={index}>{item.trim()}</li>)}
               </ul>
+            </div>
+          )}
+
+          {/* Where to buy (Bohol) - mobile-first accordion style */}
+          {ingredientList.length > 0 && (
+            <div className="mb-5 border rounded-xl border-green-200">
+              <div className="p-3 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <p className="font-semibold text-gray-800">Where to buy (Bohol)</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="text-sm text-gray-700">
+                    City/Municipality
+                    <select
+                      className="ml-2 border rounded px-2 py-1 text-sm"
+                      value={selectedCityId}
+                      onChange={(e) => setSelectedCityId(e.target.value)}
+                    >
+                      {boholCities.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    {[
+                      { id: "supermarket", label: "Supermarket" },
+                      { id: "public_market", label: "Public Market" },
+                    ].map((t) => {
+                      const active = storeTypeFilters.includes(t.id);
+                      return (
+                        <button
+                          key={t.id}
+                          onClick={() =>
+                            setStoreTypeFilters((prev) =>
+                              active ? prev.filter((x) => x !== t.id) : [...prev, t.id]
+                            )
+                          }
+                          className={`px-3 py-1 rounded-full text-sm border ${
+                            active ? "bg-green-600 text-white border-green-600" : "bg-white text-gray-700 border-green-200"
+                          }`}
+                        >
+                          {t.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {storeRecommendations.map((rec) => (
+                    <div key={rec.ingredient.name} className="border rounded-lg p-3 border-green-100">
+                      <div className="text-sm font-medium text-gray-800 mb-2">{rec.ingredient.name}</div>
+                      {rec.stores.length ? (
+                        <ul className="text-sm text-gray-700 list-disc list-inside space-y-1">
+                          {rec.stores.map((s) => (
+                            <li key={s.id}>
+                              <span className="font-medium">{s.name}</span>
+                              <span className="ml-2 text-xs text-gray-500">{s.type === "public_market" ? "Public Market" : "Supermarket"}</span>
+                              {s.address ? <span className="ml-2 text-xs text-gray-500">{s.address}</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-sm text-gray-500">No suggestions for this city. Try removing filters.</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 

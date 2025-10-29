@@ -188,7 +188,7 @@
 
 // ===============================================================================================
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../supabaseClient";
 import { FiEye, FiEyeOff } from "react-icons/fi";
@@ -203,6 +203,8 @@ export default function Signup() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [isSuccess, setIsSuccess] = useState(false);
+  const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
@@ -219,42 +221,73 @@ export default function Signup() {
   const handleSignup = async (e) => {
     e.preventDefault();
 
+    if (cooldownSeconds > 0) {
+      return;
+    }
+
     if (password !== confirmPassword) {
       setErrorMsg("Passwords do not match!");
+      setIsSuccess(false);
       return;
     }
 
     if (!Object.values(rules).every(Boolean)) {
       setErrorMsg("Password does not meet all requirements.");
+      setIsSuccess(false);
       return;
     }
 
     setLoading(true);
     setErrorMsg("");
+    setIsSuccess(false);
 
     const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         data: { full_name: name },
-        emailRedirectTo: `${window.location.origin}/health-profile`,
+        emailRedirectTo:
+          import.meta.env.VITE_SUPABASE_REDIRECT_URL ||
+          `${window.location.origin}/health-profile`,
       },
     });
 
     setLoading(false);
 
     if (error) {
-      if (error.message.includes("already registered")) {
+      console.error("Signup error:", error);
+      setIsSuccess(false);
+      if (error.message && error.message.includes("already registered")) {
         setErrorMsg("This email is already in use.");
+      } else if (
+        error.message &&
+        error.message.toLowerCase().includes("rate limit")
+      ) {
+        setErrorMsg(
+          "Too many attempts. Please wait a minute and try again."
+        );
+        setCooldownSeconds(60);
+      } else if (error.message) {
+        setErrorMsg(error.message);
       } else {
         setErrorMsg("Something went wrong! Please check your connection.");
       }
     } else {
+      setIsSuccess(true);
       setErrorMsg(
         "Signup successful! Please check your email to confirm your account."
       );
     }
   };
+
+  // ⏳ Cooldown countdown for rate limits
+  useEffect(() => {
+    if (cooldownSeconds <= 0) return;
+    const id = setInterval(() => {
+      setCooldownSeconds((s) => (s <= 1 ? 0 : s - 1));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [cooldownSeconds]);
 
   // ✅ Save current route before OAuth redirect
   const saveRedirectPath = () => {
@@ -274,6 +307,7 @@ export default function Signup() {
       if (error) throw error;
     } catch (error) {
       console.error("Google signup error:", error);
+      setIsSuccess(false);
       setErrorMsg("Failed to sign up with Google.");
     }
   };
@@ -291,6 +325,7 @@ export default function Signup() {
       if (error) throw error;
     } catch (error) {
       console.error("Facebook signup error:", error);
+      setIsSuccess(false);
       setErrorMsg("Failed to sign up with Facebook.");
     }
   };
@@ -307,7 +342,13 @@ export default function Signup() {
         </p>
 
         {errorMsg && (
-          <div className="bg-red-100 text-red-600 px-4 py-2 rounded-lg text-center text-sm mb-4 w-full">
+          <div
+            className={`${
+              isSuccess
+                ? "bg-green-100 text-green-700 border border-green-300"
+                : "bg-red-100 text-red-600 border border-red-300"
+            } px-4 py-3 rounded-lg text-center text-sm mb-4 w-full`}
+          >
             {errorMsg}
           </div>
         )}
@@ -422,11 +463,19 @@ export default function Signup() {
           {/* Submit */}
           <button
             type="submit"
-            disabled={loading}
-            className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl shadow-lg transition duration-300"
+            disabled={loading || cooldownSeconds > 0}
+            className={`w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl shadow-lg transition duration-300 ${
+              loading || cooldownSeconds > 0 ? "opacity-60 cursor-not-allowed" : ""
+            }`}
           >
             {loading ? "Signing Up..." : "Sign Up"}
           </button>
+
+          {cooldownSeconds > 0 && (
+            <p className="text-xs text-gray-500 text-center">
+              Please wait {cooldownSeconds}s before trying again.
+            </p>
+          )}
         </form>
 
         {/* Divider */}
